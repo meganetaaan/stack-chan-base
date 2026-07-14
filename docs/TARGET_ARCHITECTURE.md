@@ -2,7 +2,7 @@
 
 更新日：2026年7月14日
 
-状態：E2Bの実機動作を確認、E4Bの選択経路を実装
+状態：E2BとE4Bの実機GPU推論を確認
 
 対象端末：motorola razr 50 ultra
 
@@ -18,12 +18,12 @@
 |---|---|
 | `LocalLanguageModel`境界 | 導入済み。`ConversationEngine`からRunAnywhereのLLM APIを除去 |
 | Gemma 4 E2B | LiteRT-LM 0.14.0で実装済み。razr 50 ultraでGPU推論を確認 |
-| Gemma 4 E4B | E2Bと切替可能。ダウンロードと実機推論は未検証 |
+| Gemma 4 E4B | E2Bと切替可能。ダウンロード、GPUロード、単一応答を実機確認済み |
 | MTP | モデル能力を検査し、GPU経路で有効化 |
 | モデル取得 | アプリ内ダウンロード、途中再開、容量検査、サイズ検査、SHA-256検査を実装 |
 | 会話セッション | 履歴が一致する間は再利用し、履歴窓の移動または中断時に再生成 |
 | 外部アプリ | LLM-Hub、AI Edge Gallery、AICoreへ依存しない |
-| 実機性能 | E2Bの応答生成を確認。E4Bの速度、メモリ、会話品質は未測定 |
+| 実機性能 | E2BとE4Bの応答生成を確認。両モデルの比較値とE4Bの連続動作は未測定 |
 
 LLM-HubのソースはPolyForm Noncommercial Licenseであるため、コードは移植していない。
 実装はApache License 2.0のLiteRT-LM公式Kotlin APIと公開モデル情報だけを使用している。
@@ -75,11 +75,11 @@ razr 50 ultra上のTTFT、生成速度、メモリ、発熱を測り、後述の
 
 ## 現行PoCの制約
 
-### LLMが会話制御へ直結している
+### LLM境界を導入済み
 
-[ConversationEngine.kt](../app/src/main/java/jp/stackchan/localvoicepoc/conversation/ConversationEngine.kt)はRunAnywhereの静的APIを直接呼び出している。
+[ConversationEngine.kt](../app/src/main/java/jp/stackchan/localvoicepoc/conversation/ConversationEngine.kt)は[LocalLanguageModel.kt](../app/src/main/java/jp/stackchan/localvoicepoc/model/LocalLanguageModel.kt)だけに依存する。
 
-この依存関係では、LiteRT-LMを試すために会話制御まで変更する必要があり、ランタイム間の公平な比較も難しい。
+RunAnywhereのLLM APIへの直接依存は除去したため、会話制御を変えずに推論ランタイムを比較できる。
 
 旧Qwen3 4B経路では、修正前のTTFTが30.530秒であり、ウォームアップも初回15.260秒、ページキャッシュ後3.323秒だった。
 
@@ -265,7 +265,7 @@ GGUF変換物はQwen公式配布ではない場合があるため、配布元、
 | 候補 | Androidの主経路 | 利点 | 制約 | 役割 |
 |---|---|---|---|---|
 | Gemma 4 E2B IT | LiteRT-LM GPUとMTP | GPU応答生成を実機確認済み | 会話品質が不足する場合がある | 速度基準 |
-| Gemma 4 E4B IT | LiteRT-LM GPUとMTP | E2Bより大きい会話モデル | 実機速度、メモリ、安定性が未確認 | 品質候補 |
+| Gemma 4 E4B IT | LiteRT-LM GPUとMTP | E2Bより大きい会話モデル | 単一応答は確認済みだが、実機速度、メモリ、連続動作は未測定 | 品質候補 |
 | Qwen3.5 2B | RunAnywhere llama.cpp CPU NEON | 現行SDKの置換範囲が小さい | 公開経路ではGPUを使わない | 比較候補 |
 | Qwen3 4B | RunAnywhere llama.cpp CPU NEON | 旧実装で動作済み | 10秒以上の応答遅延 | 回帰比較 |
 | Gemma 3 1B | LiteRT-LM CPUまたはGPU | 小さく速度の下限を確認できる | 対話品質が下がる可能性がある | 緊急時の速度優先候補 |

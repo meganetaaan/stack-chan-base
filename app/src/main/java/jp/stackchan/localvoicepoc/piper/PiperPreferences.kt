@@ -27,9 +27,19 @@ class PiperPreferences(context: Context) {
         }
     }
 
+    fun hasConfirmedRecommendedTerms(setupId: String): Boolean =
+        preferences.getString(KEY_CONFIRMED_RECOMMENDED_TERMS, null) == setupId
+
+    fun confirmRecommendedTerms(setupId: String) {
+        preferences.edit {
+            putString(KEY_CONFIRMED_RECOMMENDED_TERMS, setupId)
+        }
+    }
+
     private companion object {
         const val KEY_MODEL = "model"
         const val KEY_CONFIG = "config"
         const val KEY_DICTIONARY = "dictionary"
+        const val KEY_CONFIRMED_RECOMMENDED_TERMS = "confirmed_recommended_terms"
     }
 }

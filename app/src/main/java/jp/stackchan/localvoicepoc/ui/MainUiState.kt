@@ -31,6 +31,8 @@ data class MainUiState(
     val piperDictionaryPresent: Boolean = false,
     val piperLoaded: Boolean = false,
     val piperBusy: Boolean = false,
+    val piperProgress: ComponentProgress = ComponentProgress(stage = "未準備"),
+    val piperTermsConfirmationRequired: Boolean = false,
     val phase: ConversationPhase = ConversationPhase.IDLE,
     val audioLevel: Float = 0f,
     val automaticMode: Boolean = false,

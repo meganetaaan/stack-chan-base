@@ -12,10 +12,13 @@
 - Whisper Small ONNX model
 - android-vad WebRTC 2.0.10
 - Piper Plus Android AAR
-- Selected Piper Plus Japanese voice model and OpenJTalk dictionary
+- Piper Plusつくよみちゃん6言語FP16音声モデル（つくよみちゃんコーパス利用条件）
+- OpenJTalk dictionary from the Piper Plus v1.13.0 release archive
+- 利用者が選択した任意のPiper Plus日本語音声モデル
 - AndroidX, Jetpack Compose, Kotlin coroutines
 
 Gemmaの利用条件は、アプリ内の「Gemma利用条件」から確認できます。
 
 このPoCにはPiper音声モデル、OpenJTalk辞書、LLM／STTモデル本体を同梱していません。
+推奨Piper音声と辞書は、利用条件の確認後に各配布元から端末へ直接取得します。
 ローカル開発用のPiper Plus AARは作業用ZIPへ含める場合がありますが、再配布時はPiper Plusと同梱物のライセンスを別途確認してください。

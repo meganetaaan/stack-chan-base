@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val gemmaPreferences = GemmaModelPreferences(application)
@@ -154,14 +155,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         piperStore.importDictionary(uri)
     }
 
+    fun prepareRecommendedPiper() {
+        val current = mutableState.value
+        if (current.piperBusy || current.phase != ConversationPhase.IDLE) return
+        if (!piperStore.hasConfirmedRecommendedTerms()) {
+            mutableState.update {
+                it.copy(piperTermsConfirmationRequired = true, error = null)
+            }
+            return
+        }
+        startRecommendedPiperSetup()
+    }
+
+    fun confirmRecommendedPiperTerms() {
+        if (mutableState.value.piperBusy) return
+        piperStore.confirmRecommendedTerms()
+        mutableState.update { it.copy(piperTermsConfirmationRequired = false) }
+        startRecommendedPiperSetup()
+    }
+
+    fun dismissRecommendedPiperTerms() {
+        mutableState.update { it.copy(piperTermsConfirmationRequired = false) }
+    }
+
     fun loadPiper() {
         if (mutableState.value.piperBusy) return
-        mutableState.update { it.copy(piperBusy = true, piperLoaded = false, error = null) }
+        mutableState.update {
+            it.copy(
+                piperBusy = true,
+                piperLoaded = false,
+                piperProgress = ComponentProgress(stage = "Piper Plusをロード中"),
+                error = null,
+            )
+        }
         viewModelScope.launch {
             try {
                 synthesizer.load(piperStore.current())
                 mutableState.update { state ->
-                    state.copy(piperBusy = false, piperLoaded = true, error = null)
+                    state.copy(
+                        piperBusy = false,
+                        piperLoaded = true,
+                        piperProgress = ComponentProgress(stage = "ロード済み", fraction = 1f),
+                        error = null,
+                    )
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -170,6 +206,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     state.copy(
                         piperBusy = false,
                         piperLoaded = false,
+                        piperProgress = ComponentProgress(stage = "ロード失敗"),
                         error = "Piper Plusのロードに失敗: ${error.message}",
                     )
                 }
@@ -206,17 +243,99 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun launchPiperOperation(block: suspend () -> Unit) {
         if (mutableState.value.piperBusy) return
-        mutableState.update { it.copy(piperBusy = true, piperLoaded = false, error = null) }
+        mutableState.update {
+            it.copy(
+                piperBusy = true,
+                piperLoaded = false,
+                piperProgress = ComponentProgress(stage = "手動ファイルを取込中"),
+                error = null,
+            )
+        }
         viewModelScope.launch {
             try {
                 block()
                 refreshPiperFiles()
-                mutableState.update { state -> state.copy(piperBusy = false) }
+                mutableState.update { state ->
+                    state.copy(
+                        piperBusy = false,
+                        piperProgress = ComponentProgress(stage = "手動ファイル取込済み", fraction = 1f),
+                    )
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 mutableState.update { state ->
-                    state.copy(piperBusy = false, error = "ファイル取込に失敗: ${error.message}")
+                    state.copy(
+                        piperBusy = false,
+                        piperProgress = ComponentProgress(stage = "ファイル取込失敗"),
+                        error = "ファイル取込に失敗: ${error.message}",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun startRecommendedPiperSetup() {
+        val current = mutableState.value
+        if (
+            current.piperBusy ||
+            current.phase != ConversationPhase.IDLE ||
+            !current.piperAarPresent
+        ) {
+            return
+        }
+        mutableState.update {
+            it.copy(
+                piperBusy = true,
+                piperLoaded = false,
+                piperTermsConfirmationRequired = false,
+                piperProgress = ComponentProgress(stage = "自動セットアップを開始"),
+                error = null,
+            )
+        }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { synthesizer.close() }
+                val installation = piperStore.prepareRecommended { progress ->
+                    mutableState.update { state ->
+                        state.copy(
+                            piperProgress = ComponentProgress(
+                                stage = progress.stage,
+                                fraction = progress.fraction,
+                            ),
+                        )
+                    }
+                }
+                refreshPiperFiles()
+                mutableState.update {
+                    it.copy(
+                        piperProgress = ComponentProgress(
+                            stage = "Piper Plusをロード中",
+                            fraction = 1f,
+                        ),
+                    )
+                }
+                synthesizer.load(installation)
+                mutableState.update {
+                    it.copy(
+                        piperBusy = false,
+                        piperLoaded = true,
+                        piperProgress = ComponentProgress(stage = "準備完了", fraction = 1f),
+                        error = null,
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                refreshPiperFiles()
+                mutableState.update {
+                    it.copy(
+                        piperBusy = false,
+                        piperLoaded = false,
+                        piperProgress = ComponentProgress(stage = "自動セットアップ失敗"),
+                        error = "Piper Plusの自動セットアップに失敗: " +
+                            (error.message ?: error::class.java.simpleName),
+                    )
                 }
             }
         }

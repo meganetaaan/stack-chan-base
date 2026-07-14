@@ -42,6 +42,7 @@ M5StackChanとのUSBシリアル接続は次の段階です。音声I/Oは`PcmAu
 - 新経路の準備成功後に、旧版が保存したQwen3 4Bファイルだけを削除する移行処理
 - RunAnywhere SDK初期化後のテレメトリ無効化
 - 推論・再生の中断
+- 推奨Piper Plus音声のダウンロード、SHA-256検証、辞書展開、自動ロード
 - Piper音声モデル、JSON設定、OpenJTalk辞書のStorage Access Framework取込
 - USBシリアル向けバイナリフレームcodecと単体テスト
 
@@ -53,8 +54,7 @@ M5StackChanとのUSBシリアル接続は次の段階です。音声I/Oは`PcmAu
 - arm64-v8a Android端末、Android 8.0以上
 - 初回モデル取得時のみインターネット接続
 - Piper Plus Android AAR
-- Piper Plus互換の日本語`.onnx`音声モデルと対応する`.json`
-- OpenJTalk辞書
+- 任意音声を手動設定する場合は、Piper Plus互換の日本語`.onnx`、対応する`.json`、OpenJTalk辞書
 
 E2Bの配布ファイルは2,588,147,712 bytes、E4Bは3,659,530,240 bytesです。
 セットアップ開始時の空き容量は、E2Bで3.1GiB以上、E4Bで4.0GiB以上を目安にしてください。
@@ -120,15 +120,13 @@ Gradle 8.13の配布ZIPは`gradle-wrapper.properties`に記録したSHA-256と�
    旧版のQwen3 4Bがアプリ内部に残っている場合は、新経路の準備成功後に削除して保存領域を回収します。
    中断したダウンロードは次回実行時に続きから再開します。
    GPUを利用できない端末ではCPUへ退避し、画面に実際のバックエンドを表示します。
-3. Piper Plus欄の取得リンクから音声モデル、設定JSON、辞書ZIPを保存します。
-4. 音声モデルの利用条件を確認します。
-5. 辞書ZIPを展開します。
-6. Piper Plus互換の日本語音声モデル`.onnx`を選択します。
-7. 対応する`.onnx.json`または`.json`を選択します。
-8. OpenJTalk辞書そのもののフォルダを選択します。
-9. 「Piper Plusをロード」を実行します。
-10. 「録音開始」→発話→「録音終了・応答」で最初の会話を確認します。
-11. Push-to-Talkが安定した後に「自動VAD」を有効にします。
+3. 「推奨音声をダウンロードして準備」を実行します。
+   初回はつくよみちゃんコーパスの利用条件を確認します。
+   アプリが音声モデル、設定JSON、辞書ZIPを取得し、SHA-256検証、辞書展開、Piper Plusロードまで実行します。
+4. 「録音開始」→発話→「録音終了・応答」で最初の会話を確認します。
+5. Push-to-Talkが安定した後に「自動VAD」を有効にします。
+
+任意のPiper Plus音声を使う場合は、「任意音声の手動設定」からONNX、JSON、OpenJTalk辞書を取り込み、「Piper Plusをロード」を実行します。
 
 Gemmaはバックアップ対象外のアプリ内部ストレージ、Piper Plusのモデルと辞書は`files/piper-plus/`へ保存されます。
 セットアップ後の推論、認識、合成はネットワークを使用しません。
@@ -143,7 +141,7 @@ LLMの取得情報は`model/GemmaModelManifest.kt`、ASRの取得情報は`model
 | LLM | Gemma 4 E2BまたはE4B IT、LiteRT-LM 0.14.0、最大コンテキスト2,048 tokens |
 | STT | sherpa-onnx Whisper Small multilingual、`language=ja`、4 CPU threads |
 | VAD | android-vad WebRTC 2.0.10、20 ms frames |
-| TTS | 端末で取り込んだPiper Plus日本語モデル |
+| TTS | 自動取得したつくよみちゃん音声、または端末から取り込んだPiper Plus日本語モデル |
 
 LLMは`.litertlm`形式をLiteRT-LMで実行し、会話制御からは`LocalLanguageModel`として扱います。
 現在のモデルURLはHugging Faceのrevisionへ固定し、ファイルサイズとSHA-256も固定しています。
@@ -176,7 +174,8 @@ Android側の単体テストは、SDK環境で実行します。
 - motorola razr 50 ultra上で旧Qwen3経路の会話開始を確認
 - 修正版Whisperの1秒無音デコードは1.19秒で、認識言語`ja`を確認
 - Gemma 4 E2Bのダウンロード、GPUロード、応答生成をmotorola razr 50 ultraで確認
-- Gemma 4 E4Bのダウンロード、ロード、応答生成は実機未検証
+- Gemma 4 E4Bのダウンロード、GPUロード、応答生成をmotorola razr 50 ultraで確認
+- 推奨Piper Plus音声の自動取得、検証、辞書展開、非無音PCM生成をmotorola razr 50 ultraで確認
 
 詳細は`VALIDATION.md`を参照してください。
 

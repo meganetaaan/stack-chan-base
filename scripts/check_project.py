@@ -26,6 +26,8 @@ required = [
     "app/src/main/java/jp/stackchan/localvoicepoc/model/ModelCatalog.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/ModelSetupManager.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/RunAnywhereSpeechModelManager.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperAssetDownloader.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperDictionaryExtractor.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperAssetLinks.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperPlusReflectionSynthesizer.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/serial/StackChanFrame.kt",
@@ -76,6 +78,19 @@ for expected in [
     "small-tokens.txt",
 ]:
     assert expected in catalog, f"Model catalog is missing {expected}"
+
+piper_assets = (
+    root / "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperAssetLinks.kt"
+).read_text(encoding="utf-8")
+for expected in [
+    "39_652_717L",
+    "5289e9b6eaf21080803b7fe1c4dc85b5491d4c216121207a41df18dd5f68e5d7",
+    "6_901L",
+    "516058f405ec914140f34832a9d8bb5d8272ba62af9bc7ffb29349715a539780",
+    "32_461_242L",
+    "d8b6237a546d996a65009bd88f2eb845fad876505952cce98eb3fedaf99fa3d7",
+]:
+    assert expected in piper_assets, f"Piper asset manifest is missing {expected}"
 
 gemma_manifest = (
     root / "app/src/main/java/jp/stackchan/localvoicepoc/model/GemmaModelManifest.kt"

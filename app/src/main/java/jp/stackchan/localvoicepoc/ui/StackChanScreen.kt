@@ -50,6 +50,9 @@ fun StackChanScreen(
     onPickPiperModel: () -> Unit,
     onPickPiperConfig: () -> Unit,
     onPickDictionary: () -> Unit,
+    onPrepareRecommendedPiper: () -> Unit,
+    onConfirmRecommendedPiperTerms: () -> Unit,
+    onDismissRecommendedPiperTerms: () -> Unit,
     onLoadPiper: () -> Unit,
     onAutomaticModeChanged: (Boolean) -> Unit,
     onStartAutomatic: () -> Unit,
@@ -79,6 +82,7 @@ fun StackChanScreen(
                     onPickPiperModel = onPickPiperModel,
                     onPickPiperConfig = onPickPiperConfig,
                     onPickDictionary = onPickDictionary,
+                    onPrepareRecommendedPiper = onPrepareRecommendedPiper,
                     onLoadPiper = onLoadPiper,
                 )
             }
@@ -125,6 +129,35 @@ fun StackChanScreen(
             text = { Text(message) },
         )
     }
+
+    if (state.piperTermsConfirmationRequired) {
+        val uriHandler = LocalUriHandler.current
+        AlertDialog(
+            onDismissRequest = onDismissRecommendedPiperTerms,
+            confirmButton = {
+                TextButton(onClick = onConfirmRecommendedPiperTerms) {
+                    Text("確認して準備")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { uriHandler.openUri(PiperAssetLinks.MODEL_LICENSE_URL) }) {
+                        Text("利用条件を開く")
+                    }
+                    TextButton(onClick = onDismissRecommendedPiperTerms) {
+                        Text("キャンセル")
+                    }
+                }
+            },
+            title = { Text("推奨音声の利用条件") },
+            text = {
+                Text(
+                    "つくよみちゃんコーパスの利用条件が適用されます。" +
+                        "リンク先を確認してからダウンロードしてください。",
+                )
+            },
+        )
+    }
 }
 
 @Composable
@@ -135,6 +168,7 @@ private fun SetupCard(
     onPickPiperModel: () -> Unit,
     onPickPiperConfig: () -> Unit,
     onPickDictionary: () -> Unit,
+    onPrepareRecommendedPiper: () -> Unit,
     onLoadPiper: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -179,6 +213,24 @@ private fun SetupCard(
             StatusLine("音声モデル .onnx", presentLabel(state.piperModelPresent))
             StatusLine("設定 .json", presentLabel(state.piperConfigPresent))
             StatusLine("OpenJTalk辞書", presentLabel(state.piperDictionaryPresent))
+            Text("推奨音声", style = MaterialTheme.typography.labelLarge)
+            Text(
+                "${PiperAssetLinks.RECOMMENDED_MODEL_NAME}を約72MBダウンロードし、" +
+                    "辞書を展開して自動ロードします。保存には約180MB使用します。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            ModelProgressLine("自動セットアップ", state.piperProgress)
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = state.piperAarPresent && !state.piperBusy &&
+                    state.phase == ConversationPhase.IDLE,
+                onClick = onPrepareRecommendedPiper,
+            ) {
+                Text("推奨音声をダウンロードして準備")
+            }
+
+            HorizontalDivider()
+            Text("任意音声の手動設定", style = MaterialTheme.typography.labelLarge)
             PiperDownloadLinks()
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

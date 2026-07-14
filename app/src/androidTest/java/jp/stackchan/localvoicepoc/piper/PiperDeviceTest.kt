@@ -16,6 +16,51 @@ import kotlin.math.abs
 @RunWith(AndroidJUnit4::class)
 class PiperDeviceTest {
     @Test
+    fun downloadsRecommendedAssetsAndSynthesizesPcm() {
+        runBlocking {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val store = PiperAssetStore(context)
+            var lastStage = ""
+            val installation = withTimeout(RECOMMENDED_SETUP_TIMEOUT_MS) {
+                store.prepareRecommended { progress ->
+                    if (progress.stage != lastStage) {
+                        Log.i(TAG, "Recommended setup: ${progress.stage} ${progress.fraction}")
+                        lastStage = progress.stage
+                    }
+                }
+            }
+            assertTrue("推奨Piperファイル一式が揃っていません", installation.isComplete)
+            assertTrue(
+                "推奨音声モデルのサイズが一致しません",
+                installation.model.length() == PiperAssetLinks.MODEL.expectedBytes,
+            )
+            assertTrue(
+                "推奨設定JSONのサイズが一致しません",
+                installation.config.length() == PiperAssetLinks.CONFIG.expectedBytes,
+            )
+
+            val synthesizer = PiperPlusReflectionSynthesizer(context)
+            try {
+                synthesizer.load(installation)
+                var sampleCount = 0L
+                var peak = 0
+                withTimeout(TEST_TIMEOUT_MS) {
+                    synthesizer.synthesize("自動セットアップの確認です。").collect { chunk ->
+                        sampleCount += chunk.samples.size
+                        chunk.samples.forEach { sample ->
+                            peak = maxOf(peak, abs(sample.toInt()))
+                        }
+                    }
+                }
+                assertTrue("推奨音声モデルがPCMを返しませんでした", sampleCount > 0L)
+                assertTrue("推奨音声モデルのPCMが無音です", peak > MINIMUM_PEAK)
+            } finally {
+                synthesizer.close()
+            }
+        }
+    }
+
+    @Test
     fun synthesizesNonSilentPcmFromInstalledAssets() {
         runBlocking {
             val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -99,6 +144,7 @@ class PiperDeviceTest {
     private companion object {
         const val TAG = "PiperDeviceTest"
         const val TEST_TIMEOUT_MS = 60_000L
+        const val RECOMMENDED_SETUP_TIMEOUT_MS = 300_000L
         const val MINIMUM_PEAK = 64
         const val MAX_EARLY_FINISH_MS = 100L
     }
