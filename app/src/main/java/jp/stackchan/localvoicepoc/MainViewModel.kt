@@ -115,8 +115,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun prepareModels() {
-        if (mutableState.value.modelSetupRunning) return
-        val selectedModel = mutableState.value.selectedGemmaModel
+        val current = mutableState.value
+        if (!current.canStartModelMutation) return
+        val selectedModel = current.selectedGemmaModel
         mutableState.update { it.copy(modelSetupRunning = true, modelsReady = false, error = null) }
         viewModelScope.launch {
             try {
@@ -152,11 +153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectGemmaModel(modelId: String) {
         val selectedModel = GemmaModelManifest.find(modelId) ?: return
         val current = mutableState.value
-        if (
-            current.selectedGemmaModel == selectedModel ||
-            current.modelSetupRunning ||
-            current.phase != ConversationPhase.IDLE
-        ) {
+        if (current.selectedGemmaModel == selectedModel || !current.canStartModelMutation) {
             return
         }
 
@@ -206,7 +203,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun prepareRecommendedPiper() {
         val current = mutableState.value
-        if (current.piperBusy || current.phase != ConversationPhase.IDLE) return
+        if (!current.canStartModelMutation) return
         if (!piperStore.hasConfirmedRecommendedTerms()) {
             mutableState.update {
                 it.copy(piperTermsConfirmationRequired = true, error = null)
@@ -217,7 +214,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun confirmRecommendedPiperTerms() {
-        if (mutableState.value.piperBusy) return
+        if (!mutableState.value.canStartModelMutation) return
         piperStore.confirmRecommendedTerms()
         mutableState.update { it.copy(piperTermsConfirmationRequired = false) }
         startRecommendedPiperSetup()
@@ -228,7 +225,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadPiper() {
-        if (mutableState.value.piperBusy) return
+        if (!mutableState.value.canStartModelMutation) return
         mutableState.update {
             it.copy(
                 piperBusy = true,
@@ -295,7 +292,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun launchPiperOperation(block: suspend () -> Unit) {
-        if (mutableState.value.piperBusy) return
+        if (!mutableState.value.canStartModelMutation) return
         mutableState.update {
             it.copy(
                 piperBusy = true,
@@ -331,8 +328,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startRecommendedPiperSetup() {
         val current = mutableState.value
         if (
-            current.piperBusy ||
-            current.phase != ConversationPhase.IDLE ||
+            !current.canStartModelMutation ||
             !current.piperAarPresent
         ) {
             return

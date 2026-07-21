@@ -1,6 +1,6 @@
 # 状態管理と音声処理の不具合監査
 
-更新日：2026年7月21日
+更新日：2026年7月22日
 
 対象はAndroidアプリの会話制御、USB接続、マイク入力、TTS出力、VAD、LLMとPiperの取消し、およびCoreS3 FirmwareのUSB音声セッションである。
 
@@ -54,26 +54,38 @@ PCから同じCoreS3へ4個の字幕を挟みながら12秒分の無音PCMを送
 
 | ID | 状態 | 不具合と最小反例 | REDテスト | GREEN条件 |
 |---|---|---|---|---|
-| A-01 | RED未作成 | USB attachが既存Activityの上へ新しいActivityを作り、二つのUSB ownerが同居する。 | Manifestのlaunch policyとowner数を検査する。 | USB attachを何回受けてもActivityとUSB ownerが一つである。 |
-| A-02 | RED未作成 | Sink内部のsenderが独立した`SupervisorJob`配下にあり、Firmware `ERROR`が会話Jobを直ちに失敗させない。 | `ERROR`後に追加writeやfinishを行わなくても、親Jobが短時間で失敗することを検査する。 | 実機traceのようなcredit待ちでも、エラー受信直後に会話Jobが終了する。 |
-| A-03 | RED未作成 | AndroidがFirmwareの4-byte error codeとstreamを捨て、すべて同じ例外へ畳む。 | error codeとstreamの保持を検査する。 | traceとUI errorがFirmware codeおよび対象streamを示す。 |
-| A-04 | RED未作成 | マイクflow終了時の`MIC_STOP`が非同期であり、`START(old), START(new), STOP(old)`の順序を許す。 | `MIC_STOPPED`前に次の`MIC_START`を送らないことを検査する。 | stop確定後だけ次sessionを開始する。 |
-| A-05 | RED未作成 | `MIC_STARTED`前の遅延PCMを新しい録音へ入れる。 | start応答前のPCMを流してもcollectorへ届かないことを検査する。 | 現sessionのstart応答とstream IDが一致したPCMだけを受理する。 |
-| A-06 | RED未作成 | マイクの`trySend`結果を無視し、channel満杯時にPCMを通知なしで捨てる。 | consumerを停止してbuffer上限を越えたとき、明示的に失敗することを検査する。 | PCMをbackpressureするか、overflowをsession errorとして通知する。 |
-| A-07 | RED未作成 | 古い`SerialInputOutputManager`のerrorまたはHELLO応答が新接続を閉じたりREADYへ変えたりできる。 | 接続世代を全列挙し、旧世代eventが新世代を変えないことを検査する。 | callbackとtimeoutを接続世代で照合する。 |
-| A-08 | RED未作成 | portをfieldへ設定した後にHELLO送信が失敗すると、閉じたportがfieldに残り、retryが早期returnする。 | 接続途中の送信失敗後に再接続できることを検査する。 | 失敗経路が現在世代の全resourceを一度だけ解放する。 |
-| A-09 | RED未作成 | SinkはHELLOの`maxPayload`を参照せず、常に3,840-byte frameを送る。 | `maxPayload=640`のpeerへ送るframe長を検査する。 | 合意値以下の偶数payloadへ分割する。 |
-| A-10 | RED未作成 | `abort()`がsender停止前に`SPEAKER_ABORT`を送り、競合するとabort後のPCM送信を許す。 | writeをblockした状態でabortし、wire順序を検査する。 | senderを停止してからabortを送り、以後のPCMを0件にする。 |
-| A-11 | RED未作成 | LLM callbackの`trySend`がbuffer満杯時にtokenを捨て、応答文とTTSを欠落させる。 | 64件を超える同期callbackを流し、全deltaを保持することを検査する。 | callback列と生成文字列が一致する。 |
-| A-12 | RED未作成 | LLM例外時にsentence channelを正常closeし、部分応答を正常な`SPEAKER_END`へ進める順序がある。 | 一文生成後にLLMを失敗させ、sinkのterminal controlを検査する。 | 生成失敗は必ず`SPEAKER_ABORT`になる。 |
-| A-13 | RED未作成 | `stop()`が会話Jobをcancelする前にsinkとmodelの停止を待ち、待機中に次のPiper合成を始められる。 | stop中に次文を供給し、追加合成が始まらないことを検査する。 | Jobを先にcancelし、その後resourceを停止してjoinする。 |
-| A-14 | RED未作成 | モデル準備、手動Piper取込、Piper loadを会話中に直接呼べる。 | 各操作を非IDLE状態で呼び、model closeや書換えが起きないことを検査する。 | ViewModel境界でも会話中のmodel mutationを拒否する。 |
-| A-15 | RED未作成 | 雑音床校正が最小RMSを採るため、定常雑音を過小評価する。 | 高めの一定雑音で校正し、近いRMSを非発話と判定する。 | 校正値が定常雑音へ収束し、閾値が雑音を上回る。 |
-| F-01 | RED未作成 | Firmwareのspeaker controlとPCMにsession識別子がなく、`START(1), START(2), ABORT(1)`がsession 2を止める。 | 二sessionのevent列を全列挙する。 | 異なるstream IDのeventがcurrent sessionを変更しない。 |
-| F-02 | RED未作成 | `SPEAKER_END`と`SPEAKER_ABORT`がsample rate、payload、再生終了状態を検証しない。 | rate不一致、payloadあり、END後TEXTの境界を列挙する。 | 不正controlはERRORになり、現session状態を壊さない。 |
-| F-03 | RED未作成 | Workerとmain VM間の`audio-drained`、`audio-failed`にsession IDがなく、遅延応答を新出力へ適用できる。 | 旧session応答を新session開始後に配送する。 | 旧streamのWorker応答を無視する。 |
-| F-04 | RED未作成 | Firmwareの送信queueに旧sessionのcreditとterminal controlが残り、新sessionへ配送され得る。 | stopとrestartの間へ送信遅延を挟む。 | controlへstream IDを付け、旧eventを受信側と送信側の双方で除外する。 |
-| F-05 | RED未作成 | speaker busy中の新しい`SPEAKER_START`が旧sessionを通知なしで破棄する。 | active中に二つ目のstartを送る。 | 同一streamの冪等retry以外はbusy errorになり、旧sessionを維持する。 |
+| A-01 | GREEN確認 | USB attachが既存Activityの上へ新しいActivityを作り、二つのUSB ownerが同居する。 | Manifestのlaunch policyとowner数を検査する。 | USB attachを何回受けてもActivityとUSB ownerが一つである。 |
+| A-02 | GREEN確認 | Sink内部のsenderが独立した`SupervisorJob`配下にあり、Firmware `ERROR`が会話Jobを直ちに失敗させない。 | `ERROR`後に追加writeやfinishを行わなくても、親Jobが短時間で失敗することを検査する。 | 実機traceのようなcredit待ちでも、エラー受信直後に会話Jobが終了する。 |
+| A-03 | GREEN確認 | AndroidがFirmwareの4-byte error codeとstreamを捨て、すべて同じ例外へ畳む。 | error codeとstreamの保持を検査する。 | traceとUI errorがFirmware codeおよび対象streamを示す。 |
+| A-04 | GREEN確認 | マイクflow終了時の`MIC_STOP`が非同期であり、`START(old), START(new), STOP(old)`の順序を許す。 | `MIC_STOPPED`前に次の`MIC_START`を送らないことを検査する。 | stop確定後だけ次sessionを開始する。 |
+| A-05 | GREEN確認 | `MIC_STARTED`前の遅延PCMを新しい録音へ入れる。 | start応答前のPCMを流してもcollectorへ届かないことを検査する。 | 現sessionのstart応答とstream IDが一致したPCMだけを受理する。 |
+| A-06 | GREEN確認 | マイクの`trySend`結果を無視し、channel満杯時にPCMを通知なしで捨てる。 | consumerを停止してbuffer上限を越えたとき、明示的に失敗することを検査する。 | PCMをbackpressureするか、overflowをsession errorとして通知する。 |
+| A-07 | GREEN確認 | 古い`SerialInputOutputManager`のerrorまたはHELLO応答が新接続を閉じたりREADYへ変えたりできる。 | 接続世代を全列挙し、旧世代eventが新世代を変えないことを検査する。 | callbackとtimeoutを接続世代で照合する。 |
+| A-08 | GREEN確認 | portをfieldへ設定した後にHELLO送信が失敗すると、閉じたportがfieldに残り、retryが早期returnする。 | 接続途中の送信失敗後に再接続できることを検査する。 | 失敗経路が現在世代の全resourceを一度だけ解放する。 |
+| A-09 | GREEN確認 | SinkはHELLOの`maxPayload`を参照せず、常に3,840-byte frameを送る。 | `maxPayload=640`のpeerへ送るframe長を検査する。 | 合意値以下の偶数payloadへ分割する。 |
+| A-10 | GREEN確認 | `abort()`がsender停止前に`SPEAKER_ABORT`を送り、競合するとabort後のPCM送信を許す。 | writeをblockした状態でabortし、wire順序を検査する。 | senderを停止してからabortを送り、以後のPCMを0件にする。 |
+| A-11 | GREEN確認 | LLM callbackの`trySend`がbuffer満杯時にtokenを捨て、応答文とTTSを欠落させる。 | 64件を超える同期callbackを流し、全deltaを保持することを検査する。 | callback列と生成文字列が一致する。 |
+| A-12 | GREEN確認 | LLM例外時にsentence channelを正常closeし、部分応答を正常な`SPEAKER_END`へ進める順序がある。 | 一文生成後にLLMを失敗させ、sinkのterminal controlを検査する。 | 生成失敗は必ず`SPEAKER_ABORT`になる。 |
+| A-13 | GREEN確認 | `stop()`が会話Jobをcancelする前にsinkとmodelの停止を待ち、待機中に次のPiper合成を始められる。 | stop中に次文を供給し、追加合成が始まらないことを検査する。 | Jobを先にcancelし、その後resourceを停止してjoinする。 |
+| A-14 | GREEN確認 | モデル準備、手動Piper取込、Piper loadを会話中に直接呼べる。 | 各操作を非IDLE状態で呼び、model closeや書換えが起きないことを検査する。 | ViewModel境界でも会話中のmodel mutationを拒否する。 |
+| A-15 | GREEN確認 | 雑音床校正が最小RMSを採るため、定常雑音を過小評価する。 | 高めの一定雑音で校正し、近いRMSを非発話と判定する。 | 校正値が定常雑音へ収束し、閾値が雑音を上回る。 |
+| F-01 | GREEN確認 | Firmwareのspeaker controlとPCMにsession識別子がなく、`START(1), START(2), ABORT(1)`がsession 2を止める。 | 二sessionのevent列を全列挙する。 | 異なるstream IDのeventがcurrent sessionを変更しない。 |
+| F-02 | GREEN確認 | `SPEAKER_END`と`SPEAKER_ABORT`がsample rate、payload、再生終了状態を検証しない。 | rate不一致、payloadあり、END後TEXTの境界を列挙する。 | 不正controlはERRORになり、現session状態を壊さない。 |
+| F-03 | GREEN確認 | Workerとmain VM間の`audio-drained`、`audio-failed`にsession IDがなく、遅延応答を新出力へ適用できる。 | 旧session応答を新session開始後に配送する。 | 旧streamのWorker応答を無視する。 |
+| F-04 | GREEN確認 | Firmwareの送信queueに旧sessionのcreditとterminal controlが残り、新sessionへ配送され得る。 | stopとrestartの間へ送信遅延を挟む。 | controlへstream IDを付け、旧eventを受信側と送信側の双方で除外する。 |
+| F-05 | GREEN確認 | speaker busy中の新しい`SPEAKER_START`が旧sessionを通知なしで破棄する。 | active中に二つ目のstartを送る。 | 同一streamの冪等retry以外はbusy errorになり、旧sessionを維持する。 |
+
+## プロトコル互換性
+
+監査修正ではUSB音声プロトコルをversion 2へ上げ、20 bytesのheader内で旧`reserved`領域を16-bitの`streamId`へ変更した。
+AndroidとFirmwareはcapability bit 9の`STREAM_ID`を必須とし、version 1との後方互換性は持たない。
+双方を同時に更新する前提で、旧Androidまたは旧Firmwareとの組合せはhandshakeで拒否する。
+
+## REDからGREENへの検証記録
+
+AndroidではActivityの単一性、接続世代、マイク順序とoverflow、スピーカーerror伝播とabort順序、最大payload、LLM callback欠落、部分応答失敗、停止順序、モデル変更排他、VAD雑音床を個別の回帰テストへ固定した。
+Firmwareではspeaker session、Worker応答、送信queue、wire codecを純粋関数として検査した。
+状態照合を除いたbroken variantでは有限列挙が反例を検出し、修正版では同じ反例が成立しないことを確認した。
 
 ## 検査の自己確認
 

@@ -10,6 +10,7 @@ data class StackChanFrame(
     val sampleRate: Int = 0,
     val flags: Int = 0,
     val payload: ByteArray = byteArrayOf(),
+    val streamId: Int = 0,
 ) {
     enum class Type(val wireValue: Int) {
         CONTROL(0),
@@ -28,20 +29,21 @@ data class StackChanFrame(
 
 object StackChanFrameCodec {
     private const val MAGIC = 0x5343 // ASCII "SC"
-    private const val VERSION = 1
+    private const val VERSION = 2
     const val HEADER_BYTES = 20
     const val CRC_BYTES = 4
     const val MAX_PAYLOAD_BYTES = 4 * 1024
 
     fun encode(frame: StackChanFrame): ByteArray {
         require(frame.payload.size <= MAX_PAYLOAD_BYTES) { "Payload is too large" }
+        require(frame.streamId in 0..0xffff) { "Stream ID is out of range" }
         val buffer = ByteBuffer.allocate(HEADER_BYTES + frame.payload.size + CRC_BYTES)
             .order(ByteOrder.LITTLE_ENDIAN)
         buffer.putShort(MAGIC.toShort())
         buffer.put(VERSION.toByte())
         buffer.put(frame.type.wireValue.toByte())
         buffer.putShort(frame.flags.toShort())
-        buffer.putShort(0) // reserved
+        buffer.putShort(frame.streamId.toShort())
         buffer.putInt(frame.sequence)
         buffer.putInt(frame.sampleRate)
         buffer.putInt(frame.payload.size)
@@ -59,7 +61,7 @@ object StackChanFrameCodec {
         require(buffer.get().toInt() and 0xff == VERSION) { "Unsupported version" }
         val type = StackChanFrame.Type.fromWire(buffer.get().toInt() and 0xff)
         val flags = buffer.short.toInt() and 0xffff
-        buffer.short // reserved
+        val streamId = buffer.short.toInt() and 0xffff
         val sequence = buffer.int
         val sampleRate = buffer.int
         val payloadLength = buffer.int
@@ -78,6 +80,7 @@ object StackChanFrameCodec {
             sampleRate = sampleRate,
             flags = flags,
             payload = payload,
+            streamId = streamId,
         )
     }
 }

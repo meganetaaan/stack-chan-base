@@ -22,6 +22,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
 import java.io.IOException
 
 class SerialPcmAudioSink(
@@ -44,7 +45,9 @@ class SerialPcmAudioSink(
     private var sender: Deferred<Unit>? = null
     private var resampler: StreamingPcmResampler? = null
     private var pending = ByteArray(0)
+    private var negotiatedFrameBytes = 0
     private var sequence = 0
+    private var activeStreamId = 0
     private var availableCredit = 0
     private var playbackDone: CompletableDeferred<Unit>? = null
     private var speakerTextSupported = false
@@ -67,29 +70,37 @@ class SerialPcmAudioSink(
     override suspend fun begin(sampleRate: Int) {
         pendingAbort?.join()
         pendingAbort = null
-        check(connection.state.value is StackChanUsbState.Ready) { "ｽﾀｯｸﾁｬﾝが接続されていません。" }
+        val ready = connection.state.value as? StackChanUsbState.Ready
+            ?: error("ｽﾀｯｸﾁｬﾝが接続されていません。")
         check(collector == null) { "Speaker output is already active" }
         resetSessionMetrics(sampleRate)
         traceSession = runCatching { playbackTraceStore?.start(sampleRate, outputSampleRate) }.getOrNull()
         resampler = StreamingPcmResampler(sampleRate, outputSampleRate)
         pending = ByteArray(0)
+        negotiatedFrameBytes = minOf(defaultFrameBytes, ready.maxPayload) and -2
+        check(negotiatedFrameBytes >= 2) { "CoreS3の最大payload長が不正です。" }
         sequence = 0
+        activeStreamId = connection.allocateStreamId()
         availableCredit = 0
         playbackDone = CompletableDeferred()
-        speakerTextSupported = (connection.state.value as StackChanUsbState.Ready).capabilities and
-            StackChanCapabilities.SPEAKER_TEXT != 0
-        collector = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+        speakerTextSupported = ready.capabilities and StackChanCapabilities.SPEAKER_TEXT != 0
+        val sessionScope = CoroutineScope(currentCoroutineContext())
+        collector = sessionScope.launch(start = CoroutineStart.UNDISPATCHED) {
             connection.frames.collect { frame -> handleFrame(frame) }
         }
         try {
-            connection.sendControl(StackChanControl.SPEAKER_START, outputSampleRate)
+            connection.sendControl(
+                StackChanControl.SPEAKER_START,
+                outputSampleRate,
+                streamId = activeStreamId,
+            )
             speakerStartSent = true
             traceEvent("speaker_start_sent")
             withTimeout(CONTROL_TIMEOUT_MILLISECONDS) { awaitCredit(1) }
             traceEvent("initial_credit_received", linkedMapOf("availableCreditBytes" to availableCredit))
             val queue = Channel<SpeakerItem>(OUTBOUND_QUEUE_ITEMS)
             outbound = queue
-            sender = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            sender = sessionScope.async(start = CoroutineStart.UNDISPATCHED) {
                 try {
                     for (item in queue) {
                         when (item) {
@@ -97,6 +108,7 @@ class SerialPcmAudioSink(
                                 StackChanControl.SPEAKER_TEXT,
                                 outputSampleRate,
                                 item.payload,
+                                activeStreamId,
                             )
                             is SpeakerItem.Pcm -> sendPcm(item.payload)
                         }
@@ -136,9 +148,9 @@ class SerialPcmAudioSink(
         pending.copyInto(combined)
         converted.copyInto(combined, pending.size)
         var offset = 0
-        while (combined.size - offset >= frameBytes) {
-            enqueue(SpeakerItem.Pcm(combined.copyOfRange(offset, offset + frameBytes)))
-            offset += frameBytes
+        while (combined.size - offset >= negotiatedFrameBytes) {
+            enqueue(SpeakerItem.Pcm(combined.copyOfRange(offset, offset + negotiatedFrameBytes)))
+            offset += negotiatedFrameBytes
         }
         pending = combined.copyOfRange(offset, combined.size)
     }
@@ -152,7 +164,11 @@ class SerialPcmAudioSink(
             checkNotNull(outbound) { "Speaker output queue is unavailable" }.close()
             checkNotNull(sender) { "Speaker output sender is unavailable" }.await()
             traceEvent("all_pcm_sent", sessionMetrics())
-            connection.sendControl(StackChanControl.SPEAKER_END, outputSampleRate)
+            connection.sendControl(
+                StackChanControl.SPEAKER_END,
+                outputSampleRate,
+                streamId = activeStreamId,
+            )
             speakerEndSent = true
             traceEvent("speaker_end_sent", sessionMetrics())
             withTimeout(PLAYBACK_TIMEOUT_MILLISECONDS) { checkNotNull(playbackDone).await() }
@@ -175,7 +191,10 @@ class SerialPcmAudioSink(
         pendingAbort = null
         if (collector == null) return
         traceEvent("abort_requested", sessionMetrics())
-        withContext(NonCancellable) { sendAbort("abort_requested") }
+        withContext(NonCancellable) {
+            quiesceSender()
+            sendAbort("abort_requested")
+        }
         closeTrace("aborted")
         cleanup()
     }
@@ -184,12 +203,25 @@ class SerialPcmAudioSink(
         if (collector == null) return
         val shouldAbort = speakerStartSent && !speakerDoneReceived
         val session = traceSession
+        val sessionStreamId = activeStreamId
         traceSession = null
         session?.event("stop_requested", sessionMetrics())
+        val activeSender = sender
+        outbound?.cancel()
+        outbound = null
+        activeSender?.cancel()
+        sender = null
         cleanup()
         pendingAbort = scope.launch {
+            activeSender?.join()
             if (shouldAbort) {
-                runCatching { connection.sendControl(StackChanControl.SPEAKER_ABORT, outputSampleRate) }
+                runCatching {
+                    connection.sendControl(
+                        StackChanControl.SPEAKER_ABORT,
+                        outputSampleRate,
+                        streamId = sessionStreamId,
+                    )
+                }
                     .onSuccess { session?.event("speaker_abort_sent") }
                     .onFailure { error ->
                         session?.event(
@@ -223,6 +255,7 @@ class SerialPcmAudioSink(
                 sequence = sequence++,
                 sampleRate = outputSampleRate,
                 payload = bytes,
+                streamId = activeStreamId,
             ),
         )
         sentPcmFrames += 1
@@ -244,6 +277,7 @@ class SerialPcmAudioSink(
 
     private suspend fun handleFrame(frame: StackChanFrame) {
         if (frame.type != StackChanFrame.Type.CONTROL) return
+        if (frame.streamId != activeStreamId) return
         when (StackChanControl.fromWire(frame.flags)) {
             StackChanControl.SPEAKER_CREDIT -> {
                 if (frame.sampleRate != outputSampleRate) return
@@ -274,8 +308,15 @@ class SerialPcmAudioSink(
                 creditChanged.trySend(Unit)
             }
             StackChanControl.ERROR -> {
-                traceEvent("firmware_error_received", sessionMetrics())
-                failPlayback(IOException("CoreS3が再生エラーを返しました。"))
+                val errorCode = runCatching { parseUint32Payload(frame.payload) }.getOrElse {
+                    failPlayback(IOException("CoreS3のエラー応答が不正です。", it))
+                    return
+                }
+                traceEvent(
+                    "firmware_error_received",
+                    sessionMetrics(linkedMapOf("firmwareErrorCode" to errorCode, "streamId" to frame.streamId)),
+                )
+                failPlayback(StackChanRemoteException(errorCode, frame.streamId))
             }
             else -> Unit
         }
@@ -289,7 +330,11 @@ class SerialPcmAudioSink(
     private suspend fun sendAbort(reason: String, cause: Throwable? = null) {
         if (!speakerStartSent || speakerDoneReceived) return
         try {
-            connection.sendControl(StackChanControl.SPEAKER_ABORT, outputSampleRate)
+            connection.sendControl(
+                StackChanControl.SPEAKER_ABORT,
+                outputSampleRate,
+                streamId = activeStreamId,
+            )
             traceEvent("speaker_abort_sent", linkedMapOf("reason" to reason))
         } catch (abortError: Throwable) {
             traceEvent(
@@ -304,6 +349,15 @@ class SerialPcmAudioSink(
         }
     }
 
+    private suspend fun quiesceSender() {
+        outbound?.cancel()
+        outbound = null
+        val activeSender = sender
+        sender = null
+        activeSender?.cancel()
+        activeSender?.join()
+    }
+
     private fun resetSessionMetrics(sampleRate: Int) {
         inputSampleRate = sampleRate
         inputSamples = 0
@@ -315,6 +369,7 @@ class SerialPcmAudioSink(
         speakerStartSent = false
         speakerEndSent = false
         speakerDoneReceived = false
+        activeStreamId = 0
     }
 
     private fun sessionMetrics(extra: LinkedHashMap<String, Any?> = linkedMapOf()): LinkedHashMap<String, Any?> =
@@ -323,6 +378,7 @@ class SerialPcmAudioSink(
             "inputSamples" to inputSamples,
             "inputDurationMs" to if (inputSampleRate > 0) inputSamples * 1_000L / inputSampleRate else 0,
             "outputSampleRate" to outputSampleRate,
+            "streamId" to activeStreamId,
             "outputPcmBytes" to outputPcmBytes,
             "outputDurationMs" to outputPcmBytes * 1_000L / (outputSampleRate * 2L),
             "sentPcmBytes" to sentPcmBytes,
@@ -364,12 +420,14 @@ class SerialPcmAudioSink(
         resampler?.reset()
         resampler = null
         pending = ByteArray(0)
+        negotiatedFrameBytes = 0
         availableCredit = 0
         playbackDone = null
         speakerTextSupported = false
         speakerStartSent = false
         speakerEndSent = false
         speakerDoneReceived = false
+        activeStreamId = 0
         while (creditChanged.tryReceive().isSuccess) Unit
     }
 
@@ -397,7 +455,7 @@ class SerialPcmAudioSink(
         return encoded.copyOf(end)
     }
 
-    private val frameBytes: Int
+    private val defaultFrameBytes: Int
         get() = outputSampleRate * 2 * FRAME_MILLISECONDS / 1_000
 
     private val speakerCapacityBytes: Int

@@ -9,9 +9,12 @@ interface StackChanUsbTransport {
 
     suspend fun send(frame: StackChanFrame)
 
+    fun allocateStreamId(): Int = StackChanStreamIdAllocator.next()
+
     suspend fun sendControl(
         control: StackChanControl,
         sampleRate: Int = 0,
         payload: ByteArray = byteArrayOf(),
+        streamId: Int = 0,
     )
 }

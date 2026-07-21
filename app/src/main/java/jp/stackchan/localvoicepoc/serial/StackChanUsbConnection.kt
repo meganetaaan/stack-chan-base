@@ -46,6 +46,7 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
     private val usbManager = appContext.getSystemService(Context.USB_SERVICE) as UsbManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val parser = StackChanFrameStreamParser()
+    private val generationGate = ConnectionGenerationGate()
     private val connectMutex = Mutex()
     private val writeMutex = Mutex()
     private val controlSequence = AtomicInteger(0)
@@ -78,7 +79,8 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val detached = intent.usbDevice()
                     if (detached?.deviceId == device?.deviceId) {
-                        scope.launch { closePort(StackChanUsbState.Disconnected) }
+                        val generation = generationGate.current()
+                        scope.launch { closePort(StackChanUsbState.Disconnected, generation) }
                     }
                 }
             }
@@ -122,7 +124,12 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
         }
     }
 
-    override suspend fun sendControl(control: StackChanControl, sampleRate: Int, payload: ByteArray) {
+    override suspend fun sendControl(
+        control: StackChanControl,
+        sampleRate: Int,
+        payload: ByteArray,
+        streamId: Int,
+    ) {
         send(
             StackChanFrame(
                 type = StackChanFrame.Type.CONTROL,
@@ -130,6 +137,7 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
                 sequence = controlSequence.getAndIncrement(),
                 sampleRate = sampleRate,
                 payload = payload,
+                streamId = streamId,
             ),
         )
     }
@@ -141,23 +149,31 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
     private suspend fun connectLocked(target: UsbDevice) {
         if (device?.deviceId == target.deviceId && port != null) return
         closePort(StackChanUsbState.Connecting)
+        val generation = generationGate.begin()
         mutableState.value = StackChanUsbState.Connecting
         val driver = UsbSerialProber.getDefaultProber().probeDevice(target) ?: customProber().probeDevice(target)
         if (driver == null) {
-            mutableState.value = StackChanUsbState.Error("対応するCDCインターフェースが見つかりません。")
+            generationGate.closeIfCurrent(generation) {
+                mutableState.value = StackChanUsbState.Error("対応するCDCインターフェースが見つかりません。")
+            }
             return
         }
         val openedConnection = usbManager.openDevice(target)
         if (openedConnection == null) {
-            mutableState.value = StackChanUsbState.Error("USBデバイスを開けません。")
+            generationGate.closeIfCurrent(generation) {
+                mutableState.value = StackChanUsbState.Error("USBデバイスを開けません。")
+            }
             return
         }
         val openedPort = driver.ports.firstOrNull()
         if (openedPort == null) {
             openedConnection.close()
-            mutableState.value = StackChanUsbState.Error("USBシリアルポートがありません。")
+            generationGate.closeIfCurrent(generation) {
+                mutableState.value = StackChanUsbState.Error("USBシリアルポートがありません。")
+            }
             return
         }
+        var published = false
         try {
             openedPort.open(openedConnection)
             openedPort.setParameters(
@@ -168,76 +184,123 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
             )
             val manager = SerialInputOutputManager(openedPort, object : SerialInputOutputManager.Listener {
                 override fun onNewData(data: ByteArray) {
-                    handleIncoming(data)
+                    handleIncoming(data, generation)
                 }
 
                 override fun onRunError(error: Exception) {
                     scope.launch {
-                        closePort(StackChanUsbState.Error("USB通信が停止しました: ${error.message}"))
+                        closePort(StackChanUsbState.Error("USB通信が停止しました: ${error.message}"), generation)
                     }
                 }
             })
-            synchronized(portLock) {
-                device = target
-                deviceConnection = openedConnection
-                port = openedPort
-                ioManager = manager
-                parser.reset()
+            val accepted = generationGate.runIfCurrent(generation) {
+                synchronized(portLock) {
+                    device = target
+                    deviceConnection = openedConnection
+                    port = openedPort
+                    ioManager = manager
+                    parser.reset()
+                }
             }
+            if (!accepted) {
+                runCatching { openedPort.close() }
+                openedConnection.close()
+                return
+            }
+            published = true
             manager.start()
             sendControl(StackChanControl.HELLO, payload = helloPayload())
             handshakeTimeout = scope.launch {
                 delay(HANDSHAKE_TIMEOUT_MILLISECONDS)
-                if (mutableState.value is StackChanUsbState.Connecting) {
-                    closePort(StackChanUsbState.Error("ｽﾀｯｸﾁｬﾝから応答がありません。"))
-                }
+                closePort(
+                    StackChanUsbState.Error("ｽﾀｯｸﾁｬﾝから応答がありません。"),
+                    generation,
+                    onlyWhileConnecting = true,
+                )
             }
         } catch (error: Throwable) {
-            runCatching { openedPort.close() }
-            openedConnection.close()
-            mutableState.value = StackChanUsbState.Error("USB接続に失敗しました: ${error.message}")
+            val nextState = StackChanUsbState.Error("USB接続に失敗しました: ${error.message}")
+            if (published) {
+                closePort(nextState, generation)
+            } else {
+                runCatching { openedPort.close() }
+                openedConnection.close()
+                generationGate.closeIfCurrent(generation) {
+                    mutableState.value = nextState
+                }
+            }
         }
     }
 
-    private fun handleIncoming(data: ByteArray) {
-        for (frame in parser.push(data)) {
-            if (frame.type == StackChanFrame.Type.CONTROL && frame.flags == StackChanControl.HELLO_ACK.wireValue) {
-                val result = runCatching { parseHelloPayload(frame.payload) }.getOrElse {
-                    scope.launch { closePort(StackChanUsbState.Error("HELLO_ACKが不正です。")) }
-                    return
-                }
-                if (result.first !in 640..StackChanFrameCodec.MAX_PAYLOAD_BYTES ||
-                    result.second and StackChanCapabilities.REQUIRED != StackChanCapabilities.REQUIRED
+    private fun handleIncoming(data: ByteArray, generation: Long) {
+        generationGate.runIfCurrent(generation) {
+            for (frame in parser.push(data)) {
+                if (
+                    frame.type == StackChanFrame.Type.CONTROL &&
+                    frame.flags == StackChanControl.HELLO_ACK.wireValue
                 ) {
-                    scope.launch { closePort(StackChanUsbState.Error("USB音声プロトコルの機能が不足しています。")) }
-                    return
+                    if (frame.streamId != 0) {
+                        scope.launch { closePort(StackChanUsbState.Error("HELLO_ACKのstream IDが不正です。"), generation) }
+                        return@runIfCurrent
+                    }
+                    val result = runCatching { parseHelloPayload(frame.payload) }.getOrElse {
+                        scope.launch { closePort(StackChanUsbState.Error("HELLO_ACKが不正です。"), generation) }
+                        return@runIfCurrent
+                    }
+                    if (result.first !in 640..StackChanFrameCodec.MAX_PAYLOAD_BYTES ||
+                        result.second and StackChanCapabilities.REQUIRED != StackChanCapabilities.REQUIRED
+                    ) {
+                        scope.launch {
+                            closePort(
+                                StackChanUsbState.Error("USB音声プロトコルの機能が不足しています。"),
+                                generation,
+                            )
+                        }
+                        return@runIfCurrent
+                    }
+                    handshakeTimeout?.cancel()
+                    mutableState.value = StackChanUsbState.Ready(result.first, result.second)
                 }
-                handshakeTimeout?.cancel()
-                mutableState.value = StackChanUsbState.Ready(result.first, result.second)
-            }
-            if (!mutableFrames.tryEmit(frame)) {
-                scope.launch { closePort(StackChanUsbState.Error("USB受信バッファがあふれました。")) }
-                return
+                if (!mutableFrames.tryEmit(frame)) {
+                    scope.launch { closePort(StackChanUsbState.Error("USB受信バッファがあふれました。"), generation) }
+                    return@runIfCurrent
+                }
             }
         }
     }
 
-    private fun closePort(nextState: StackChanUsbState) {
-        handshakeTimeout?.cancel()
-        handshakeTimeout = null
-        val resources = synchronized(portLock) {
-            val result = Triple(ioManager, port, deviceConnection)
-            ioManager = null
-            port = null
-            deviceConnection = null
-            device = null
-            parser.reset()
-            result
+    private fun closePort(
+        nextState: StackChanUsbState,
+        expectedGeneration: Long? = null,
+        onlyWhileConnecting: Boolean = false,
+    ) {
+        val closeAction = {
+            handshakeTimeout?.cancel()
+            handshakeTimeout = null
+            val resources = synchronized(portLock) {
+                val result = Triple(ioManager, port, deviceConnection)
+                ioManager = null
+                port = null
+                deviceConnection = null
+                device = null
+                parser.reset()
+                result
+            }
+            runCatching { resources.first?.stop() }
+            runCatching { resources.second?.close() }
+            runCatching { resources.third?.close() }
+            mutableState.value = nextState
+            Unit
         }
-        runCatching { resources.first?.stop() }
-        runCatching { resources.second?.close() }
-        runCatching { resources.third?.close() }
-        mutableState.value = nextState
+        when {
+            expectedGeneration == null -> generationGate.invalidate(closeAction)
+            onlyWhileConnecting -> generationGate.closeIfCurrentWhen(
+                expectedGeneration,
+                { mutableState.value is StackChanUsbState.Connecting },
+                closeAction,
+            )
+            else -> generationGate.closeIfCurrent(expectedGeneration, closeAction)
+        }
     }
 
     override fun close() {

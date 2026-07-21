@@ -26,10 +26,10 @@ CRC32は20 bytesのheaderとpayloadを対象とする。
 
 ```text
 magic       uint16  0x5343（wire上は43 53）
-version     uint8   1
+version     uint8   2
 type        uint8
 flags       uint16
-reserved    uint16  0
+streamId    uint16
 sequence    uint32
 sampleRate  uint32
 length      uint32
@@ -41,6 +41,11 @@ payloadは最大4,096 bytesとする。
 USB readとフレーム境界は一致しないため、受信側は断片化と複数フレームの結合を処理する。
 magic、version、length、CRCが不正な場合は次のmagicまで読み飛ばして再同期する。
 
+version 2はversion 1と後方互換ではない。
+AndroidとFirmwareはcapability bit 9の`STREAM_ID`を必須として確認し、不一致なら接続を拒否する。
+`HELLO`、`HELLO_ACK`、`STATUS`は`streamId=0`を使い、マイクとスピーカーの各sessionは0以外のIDを使う。
+現在のsessionとIDが異なるPCM、credit、終了、取消し、errorは状態へ適用しない。
+
 typeは`CONTROL=0`、`MICROPHONE_PCM=1`、`SPEAKER_PCM=2`を使用する。
 診断Firmwareは`DIAGNOSTICS=5`でAudioOutの統計を返す。
 既存の`EXPRESSION=3`と`MOTION=4`は今回の音声経路では使用しない。
@@ -51,6 +56,7 @@ typeは`CONTROL=0`、`MICROPHONE_PCM=1`、`SPEAKER_PCM=2`を使用する。
 HELLO payloadは最大payload長とcapability bitsetを並べた二つの`uint32`である。
 Firmwareは同じ形式の`HELLO_ACK`を返す。
 Androidはマイク、スピーカー、credit、24 kHz出力のcapabilityを確認して`READY`へ遷移する。
+Androidはさらにcapability bit 9のstream ID対応を必須として確認する。
 
 録音は`MIC_START`、`MIC_STARTED`、`MICROPHONE_PCM`、`MIC_STOP`、`MIC_STOPPED`の順で制御する。
 再生は`SPEAKER_START`、`SPEAKER_CREDIT`、`SPEAKER_PCM`、`SPEAKER_END`、`SPEAKER_DONE`の順で制御する。

@@ -49,9 +49,27 @@ class StackChanFrameCodecTest {
             ),
         )
         assertEquals(
-            "43530102200000002a000000c05d0000040000000102030403a97e55",
+            "43530202200000002a000000c05d000004000000010203044304066c",
             encoded.joinToString("") { "%02x".format(it.toInt() and 0xff) },
         )
+    }
+
+    @Test
+    fun roundTripsTheStreamIdInTheReservedHeaderField() {
+        val encoded = StackChanFrameCodec.encode(
+            StackChanFrame(
+                type = StackChanFrame.Type.SPEAKER_PCM,
+                streamId = 0x0201,
+                sequence = 7,
+                sampleRate = 24_000,
+                payload = byteArrayOf(1, 2),
+            ),
+        )
+
+        assertEquals(0x01, encoded[6].toInt() and 0xff)
+        assertEquals(0x02, encoded[7].toInt() and 0xff)
+        assertEquals(0x0201, StackChanFrameCodec.decode(encoded).streamId)
+        assertTrue(StackChanCapabilities.ALL and StackChanCapabilities.STREAM_ID != 0)
     }
 
     @Test

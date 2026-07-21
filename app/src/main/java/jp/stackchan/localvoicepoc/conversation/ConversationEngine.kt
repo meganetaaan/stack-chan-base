@@ -18,7 +18,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collect
@@ -44,7 +43,7 @@ class ConversationEngine(
     private val recognitionCaptureStore: RecognitionCaptureStore? = null,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val detector = EndpointDetector()
+    private val detector = lazy { EndpointDetector() }
     private val mutableEvents = MutableSharedFlow<ConversationEvent>(extraBufferCapacity = 64)
     private val history = ArrayDeque<Pair<String, String>>()
 
@@ -136,12 +135,16 @@ class ConversationEngine(
     }
 
     suspend fun stop() {
+        val activePushToTalk = pushToTalkJob
+        val activeSession = sessionJob
+        activePushToTalk?.cancel()
+        activeSession?.cancel()
         audioSource.stop()
         synthesizer.cancel()
-        audioSink.abort()
         languageModel.cancel()
-        pushToTalkJob?.cancelAndJoin()
-        sessionJob?.cancelAndJoin()
+        audioSink.abort()
+        activePushToTalk?.join()
+        activeSession?.join()
         pushToTalkJob = null
         sessionJob = null
         pushToTalkBuffer = null
@@ -149,12 +152,12 @@ class ConversationEngine(
     }
 
     private suspend fun captureAutomaticUtterance(): ByteArray {
-        detector.reset()
+        detector.value.reset()
         val accumulator = UtteranceAccumulator()
         return audioSource.chunks()
             .mapNotNull { chunk ->
                 mutableEvents.tryEmit(ConversationEvent.AudioLevel(Pcm.rms16Le(chunk)))
-                val speech = detector.isSpeech(chunk)
+                val speech = detector.value.isSpeech(chunk)
                 val wasCapturing = accumulator.isCapturing
                 val result = accumulator.accept(chunk, speech, chunkDurationMilliseconds(chunk))
                 when {
@@ -196,7 +199,7 @@ class ConversationEngine(
         mutableEvents.emit(ConversationEvent.AssistantText(response))
     }
 
-    private suspend fun generateAndSpeak(userText: String): String = coroutineScope {
+    internal suspend fun generateAndSpeak(userText: String): String = coroutineScope {
         val sentenceChannel = Channel<String>(capacity = 2)
         val chunker = SentenceChunker()
         var audioBegun = false
@@ -255,6 +258,9 @@ class ConversationEngine(
                 }
             }
             chunker.flush()?.let { sentenceChannel.send(it) }
+        } catch (error: Throwable) {
+            sentenceChannel.close(error)
+            throw error
         } finally {
             sentenceChannel.close()
         }
@@ -306,7 +312,7 @@ class ConversationEngine(
 
     override fun close() {
         audioSource.stop()
-        detector.close()
+        if (detector.isInitialized()) detector.value.close()
         speechRecognizer.close()
         languageModel.close()
         synthesizer.close()

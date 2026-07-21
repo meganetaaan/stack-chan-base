@@ -50,6 +50,9 @@ data class MainUiState(
     val assistantDraft: String = "",
     val error: String? = null,
 ) {
+    val canStartModelMutation: Boolean
+        get() = phase == ConversationPhase.IDLE && !modelSetupRunning && !piperBusy
+
     val pipelineReady: Boolean
         get() = sdkStatus is SdkBootstrap.Status.Ready && modelsReady && piperLoaded &&
             usbStatus == UsbConnectionStatus.READY

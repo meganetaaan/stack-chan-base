@@ -185,7 +185,7 @@ private fun SetupCard(
             Text("ローカルモデル", fontWeight = FontWeight.SemiBold)
             GemmaModelSelector(
                 selected = state.selectedGemmaModel,
-                enabled = !state.modelSetupRunning && state.phase == ConversationPhase.IDLE,
+                enabled = state.canStartModelMutation,
                 onSelected = onGemmaModelSelected,
             )
             ModelProgressLine(
@@ -203,7 +203,7 @@ private fun SetupCard(
             GemmaInformationLinks(state.selectedGemmaModel)
             Button(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = state.sdkStatus is SdkBootstrap.Status.Ready && !state.modelSetupRunning,
+                enabled = state.sdkStatus is SdkBootstrap.Status.Ready && state.canStartModelMutation,
                 onClick = onPrepareModels,
             ) {
                 Text(if (state.modelsReady) "モデルを再ロード" else "モデルをダウンロードして準備")
@@ -224,8 +224,7 @@ private fun SetupCard(
             ModelProgressLine("自動セットアップ", state.piperProgress)
             Button(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = state.piperAarPresent && !state.piperBusy &&
-                    state.phase == ConversationPhase.IDLE,
+                enabled = state.piperAarPresent && state.canStartModelMutation,
                 onClick = onPrepareRecommendedPiper,
             ) {
                 Text("推奨音声をダウンロードして準備")
@@ -238,24 +237,24 @@ private fun SetupCard(
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    enabled = !state.piperBusy,
+                    enabled = state.canStartModelMutation,
                     onClick = onPickPiperModel,
                 ) { Text("ONNX") }
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    enabled = !state.piperBusy,
+                    enabled = state.canStartModelMutation,
                     onClick = onPickPiperConfig,
                 ) { Text("JSON") }
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    enabled = !state.piperBusy,
+                    enabled = state.canStartModelMutation,
                     onClick = onPickDictionary,
                 ) { Text("辞書") }
             }
             Button(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = state.piperAarPresent && state.piperModelPresent &&
-                    state.piperConfigPresent && state.piperDictionaryPresent && !state.piperBusy,
+                    state.piperConfigPresent && state.piperDictionaryPresent && state.canStartModelMutation,
                 onClick = onLoadPiper,
             ) {
                 Text(if (state.piperLoaded) "Piper Plus ロード済み" else "Piper Plusをロード")

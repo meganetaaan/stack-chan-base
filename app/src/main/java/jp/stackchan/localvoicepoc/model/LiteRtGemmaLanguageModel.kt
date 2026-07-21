@@ -18,9 +18,7 @@ import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -28,7 +26,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.concurrent.atomic.AtomicBoolean
 
 /** Gemma 4 adapter implemented against the public LiteRT-LM API. */
 @OptIn(ExperimentalApi::class)
@@ -204,34 +201,28 @@ class LiteRtGemmaLanguageModel(
     private fun streamMessages(
         conversation: Conversation,
         userText: String,
-    ): Flow<Message> = callbackFlow {
-        val terminalCallbackReceived = AtomicBoolean(false)
-        val callback = object : MessageCallback {
-            override fun onMessage(message: Message) {
-                if (trySend(message).isFailure) {
-                    Log.w(TAG, "Could not enqueue a LiteRT-LM message")
+    ): Flow<Message> = losslessCallbackFlow(
+        start = { onValue, onDone, onError ->
+            val callback = object : MessageCallback {
+                override fun onMessage(message: Message) {
+                    onValue(message)
+                }
+
+                override fun onDone() {
+                    onDone()
+                }
+
+                override fun onError(throwable: Throwable) {
+                    onError(throwable)
                 }
             }
-
-            override fun onDone() {
-                terminalCallbackReceived.set(true)
-                close(null)
-            }
-
-            override fun onError(throwable: Throwable) {
-                terminalCallbackReceived.set(true)
-                close(throwable)
-            }
-        }
-
-        conversation.sendMessageAsync(userText, callback, TEMPLATE_CONTEXT)
-        awaitClose {
-            if (!terminalCallbackReceived.get()) {
-                runCatching { conversation.cancelProcess() }
-                    .onFailure { Log.w(TAG, "LiteRT-LM cancellation failed", it) }
-            }
-        }
-    }
+            conversation.sendMessageAsync(userText, callback, TEMPLATE_CONTEXT)
+        },
+        cancel = {
+            runCatching { conversation.cancelProcess() }
+                .onFailure { Log.w(TAG, "LiteRT-LM cancellation failed", it) }
+        },
+    )
 
     private fun conversationFor(engine: Engine, request: GenerationRequest): Conversation {
         val reusable = retainedConversation

@@ -19,31 +19,17 @@ class EndpointDetector(
         0,
     )
     private val frame = ShortArray(FRAME_SAMPLES)
-
-    private var noiseFloor = INITIAL_NOISE_FLOOR
-    private var calibrationChunks = 0
+    private val noiseGate = AdaptiveNoiseGate(minimumRmsThreshold, noiseMultiplier)
 
     fun reset() {
-        noiseFloor = INITIAL_NOISE_FLOOR
-        calibrationChunks = 0
+        noiseGate.reset()
     }
 
     fun isSpeech(chunk: ByteArray): Boolean {
         val webRtcSpeech = detectWithWebRtc(chunk)
         val rms = Pcm.rms16Le(chunk)
 
-        if (calibrationChunks < CALIBRATION_CHUNKS && !webRtcSpeech) {
-            noiseFloor = if (calibrationChunks == 0) rms else minOf(noiseFloor, rms)
-            calibrationChunks += 1
-            return false
-        }
-
-        val threshold = maxOf(minimumRmsThreshold, noiseFloor * noiseMultiplier)
-        val energySpeech = rms >= threshold
-        if (!webRtcSpeech && !energySpeech) {
-            noiseFloor = noiseFloor * NOISE_HISTORY_WEIGHT + rms * (1f - NOISE_HISTORY_WEIGHT)
-        }
-        return webRtcSpeech || energySpeech
+        return noiseGate.isSpeech(rms, webRtcSpeech)
     }
 
     override fun close() {
@@ -68,9 +54,5 @@ class EndpointDetector(
     private companion object {
         const val FRAME_SAMPLES = 320 // 20 ms at 16 kHz; a valid WebRTC VAD frame.
         const val FRAME_BYTES = FRAME_SAMPLES * 2
-        // CoreS3 sends 20 ms frames. Calibrate for up to the first 300 ms.
-        const val CALIBRATION_CHUNKS = 15
-        const val INITIAL_NOISE_FLOOR = 0.0015f
-        const val NOISE_HISTORY_WEIGHT = 0.95f
     }
 }

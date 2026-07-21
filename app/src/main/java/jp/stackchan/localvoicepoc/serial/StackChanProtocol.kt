@@ -2,6 +2,13 @@ package jp.stackchan.localvoicepoc.serial
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
+
+class StackChanRemoteException(
+    val errorCode: Int,
+    val streamId: Int = 0,
+) : IOException("CoreS3がエラーを返しました。code=$errorCode, stream=$streamId")
 
 enum class StackChanControl(val wireValue: Int) {
     HELLO(1), HELLO_ACK(2), ERROR(3),
@@ -23,8 +30,15 @@ object StackChanCapabilities {
     const val SPEAKER_RATE_24000 = 1 shl 5
     const val SPEAKER_TEXT = 1 shl 6
     const val STATUS_ICON = 1 shl 8
-    const val REQUIRED = MICROPHONE_PCM or SPEAKER_PCM or SPEAKER_CREDIT or SPEAKER_RATE_24000
-    const val ALL = REQUIRED or SPEAKER_RATE_8000 or SPEAKER_RATE_16000 or SPEAKER_TEXT or STATUS_ICON
+    const val STREAM_ID = 1 shl 9
+    const val REQUIRED = MICROPHONE_PCM or SPEAKER_PCM or SPEAKER_CREDIT or SPEAKER_RATE_24000 or STREAM_ID
+    const val ALL = REQUIRED or SPEAKER_RATE_8000 or SPEAKER_RATE_16000 or SPEAKER_TEXT or STATUS_ICON or STREAM_ID
+}
+
+internal object StackChanStreamIdAllocator {
+    private val lastId = AtomicInteger(0)
+
+    fun next(): Int = lastId.updateAndGet { current -> if (current >= 0xffff) 1 else current + 1 }
 }
 
 enum class StackChanStatus(val wireValue: Int) {
