@@ -32,6 +32,11 @@ USB接続時のAndroidログには、同じtask内に`MainActivity`が2個存在
 PCから同じCoreS3へ4個の字幕を挟みながら12秒分の無音PCMを送った試験では、150 frame、576,000 bytesを送信し、`SPEAKER_DONE`まで到達した。
 この結果は、複数字幕または12秒のPCM長だけではFirmwareの早期終了が起きないことを示す。
 
+Activityとstream IDの修正後にAndroidとCoreS3を直結した試験では、4.582秒分の応答に対し、再生開始から1.559秒で`code=3, stream=2`を受信した。
+Androidはこの時点までに22 frame、84,480 bytesのPCMを連番で送信し、Firmwareから85,248 bytesのcreditを受信していた。
+字幕は3件であり、`SPEAKER_END`は未送信だった。
+旧Firmwareのcode 3はsequence欠落、PCM queue超過、字幕queue超過を区別しないが、字幕件数から原因候補をUSB受信時のsequence欠落またはPCM queue超過へ限定できる。
+
 ## 名前付き不変条件
 
 - **SingleUsbOwner**：一つのAndroid process内では、一つのUSB deviceを一つのconnection ownerだけが開く。
@@ -46,6 +51,7 @@ PCから同じCoreS3へ4個の字幕を挟みながら12秒分の無音PCMを送
 - **ExclusiveModelMutation**：認識、生成、合成中に、使用中のモデルを閉じる操作を開始しない。
 - **AmbientNoiseIsNotSpeech**：校正済みの定常雑音は、雑音床を少し上回っただけで発話開始にならない。
 - **CorrelatedTerminalEvent**：`CREDIT`、`DONE`、`ERROR`、Worker応答は、発生元sessionだけへ適用する。
+- **BoundedUsbRxBurst**：native USB受信ringの未読領域と、新たに許可したPCMのwire bytesを合計しても、ring容量を超えない。
 
 ## TODO台帳
 
@@ -74,6 +80,7 @@ PCから同じCoreS3へ4個の字幕を挟みながら12秒分の無音PCMを送
 | F-03 | GREEN確認 | Workerとmain VM間の`audio-drained`、`audio-failed`にsession IDがなく、遅延応答を新出力へ適用できる。 | 旧session応答を新session開始後に配送する。 | 旧streamのWorker応答を無視する。 |
 | F-04 | GREEN確認 | Firmwareの送信queueに旧sessionのcreditとterminal controlが残り、新sessionへ配送され得る。 | stopとrestartの間へ送信遅延を挟む。 | controlへstream IDを付け、旧eventを受信側と送信側の双方で除外する。 |
 | F-05 | GREEN確認 | speaker busy中の新しい`SPEAKER_START`が旧sessionを通知なしで破棄する。 | active中に二つ目のstartを送る。 | 同一streamの冪等retry以外はbusy errorになり、旧sessionを維持する。 |
+| F-06 | GREEN確認 | 16 KiBのnative USB受信ringに対し12 KiBのcreditを許可し、未読データが残る場合の余裕が小さい。code 3が三原因を兼ねるため再発時に切り分けられない。 | ring残量とPCM wire burstの合計を検査し、sequence、PCM queue、字幕queueのerror codeを個別に検査する。 | 32 KiB ring、16 KiB read、8 KiB creditで不変条件を満たし、三原因をcode 6、7、8で識別する。 |
 
 ## プロトコル互換性
 
@@ -92,17 +99,23 @@ Firmwareではspeaker session、Worker応答、送信queue、wire codecを純粋
 Firmwareの修正は、2026年7月22日時点の`origin/develop`、コミット`4ae98b20`の上へリベースした。
 Androidでは`test`、`lint`、`assembleDebug`が成功し、接続中のMotorola端末へのAPK上書きに成功した。
 同じ端末へ`MainActivity`の起動要求を2回送る試験では、2回目が既存instanceへ配送され、task内のinstanceは1個だった。
-Firmwareでは219件のunit test、70件のarchitecture test、6 targetのmanifest検査が成功した。
-CoreS3 release buildは成功し、`xs_esp32.bin`は`0x5bf980` bytes、最小app partitionの空きは63%だった。
+Firmwareではunit test、architecture test、6 targetのmanifest検査が成功した。
+CoreS3 release buildは成功し、`xs_esp32.bin`は`0x5bfbb0` bytes、最小app partitionの空きは63%だった。
 
 許可対象MAC`44:1B:F6:E2:82:B0`のCoreS3を全消去してからFirmwareを書き込み、USB protocol version 2のhandshakeが成功した。
-通常Firmwareは最大payload 4,096 bytes、capability `0x0000037f`を返した。
 音量0の診断Firmwareへ24 kHz、16-bit、monoのPCMを30秒送った結果、送信量、Firmware受信量、AudioOut書込量はすべて1,440,000 bytesで一致した。
 この試験は`SPEAKER_DONE`まで到達し、starvationは0回だった。
 診断CSVは`firmware/dist/usb-audio-diagnostics/v2-burst-30s-20260722.csv`へ保存し、SHA-256は`165d4d0ea652052ca625a5b0323a6570e675eeedb946fc748c5bd392aa2b2539`である。
+USB受信ring、read量、credit上限の修正後には、同じ形式のPCMをburst modeで60秒送った。
+送信量、Firmware受信量、AudioOut書込量はすべて2,880,000 bytesで一致し、`SPEAKER_DONE`まで到達してstarvationは0回だった。
+最大受信間隔は329 ms、最大書込可能量通知間隔は196 msだった。
+診断CSVは`firmware/dist/usb-audio-diagnostics/v2-rx-headroom-60s-20260722.csv`へ保存し、SHA-256は`57da4aad92d27c24c16952b4d2eb2030665861195148b23f7be4f9d194a3c4c2`である。
 試験後は音量0.25の通常Firmwareへ戻し、書込hashとversion 2 handshakeを再確認した。
+通常Firmwareは最大payload 4,096 bytes、capability `0x0000037f`を返している。
 
-AndroidとCoreS3を直接つないだ会話全経路の再確認は、両機をPCへ接続した現在の配線では実施していない。
+今回更新したAndroid APKについても`test`、`lint`、`assembleDebug`は成功した。
+ただし、PCからAndroid端末が認識されなくなったため、このAPKの上書きとUSB受信余裕修正後の直結再試験は実施していない。
+Android端末をPCへ接続し直してAPKを上書きした後、同じ応答またはそれ以上の長さを使う直結再試験が必要である。
 
 ## 検査の自己確認
 

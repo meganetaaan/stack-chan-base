@@ -468,7 +468,8 @@ USB CDCの転送量は設定baud rateだけでは決まらず、USB実装、Firm
 
 スタックチャンは受信可能なbuffer時間またはcreditを通知し、Androidはその範囲を超えて送らない。
 
-現行値は1秒queue、500ミリ秒prebuffer、12 KiBのcredit windowである。
+現行値は1秒queue、500ミリ秒prebuffer、8 KiBのcredit windowである。
+CoreS3は32 KiBのnative USB受信ringから16 KiBずつ読み出し、未読データが残っている状態でも次のcredit burstを収容する。
 音量0の15秒実機診断ではstarvation 0回を確認しており、Android実機で操作遅延との釣り合いを再評価する。
 
 第一段階は半二重PCMとし、TTS再生中はマイク音声をASRへ渡さない。

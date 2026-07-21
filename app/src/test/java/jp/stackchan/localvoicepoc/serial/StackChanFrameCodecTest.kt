@@ -88,6 +88,15 @@ class StackChanFrameCodecTest {
     }
 
     @Test
+    fun explainsDistinctFirmwareSpeakerReceiveErrors() {
+        assertEquals(6, StackChanErrorCode.SPEAKER_SEQUENCE_MISMATCH.wireValue)
+        assertEquals(7, StackChanErrorCode.SPEAKER_BUFFER_OVERFLOW.wireValue)
+        assertEquals(8, StackChanErrorCode.CAPTION_QUEUE_OVERFLOW.wireValue)
+        assertTrue(StackChanRemoteException(6, 2).message.orEmpty().contains("PCM sequenceが欠落"))
+        assertTrue(StackChanRemoteException(7, 2).message.orEmpty().contains("PCM受信バッファ"))
+    }
+
+    @Test
     fun streamParserAcceptsFragmentedAndCoalescedFrames() {
         val first = StackChanFrameCodec.encode(
             StackChanFrame(StackChanFrame.Type.CONTROL, sequence = 0, flags = StackChanControl.HELLO.wireValue),

@@ -5,10 +5,29 @@ import java.nio.ByteOrder
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
+enum class StackChanErrorCode(val wireValue: Int, val description: String) {
+    INVALID_REQUEST(1, "要求形式が不正です"),
+    INVALID_STREAM_DATA(2, "音声streamデータが不正です"),
+    TRANSPORT_OVERFLOW(3, "USB送信キューがあふれました"),
+    AUDIO_OUTPUT(4, "AudioOutでエラーが発生しました"),
+    BUSY(5, "別の音声streamを処理中です"),
+    SPEAKER_SEQUENCE_MISMATCH(6, "PCM sequenceが欠落しました"),
+    SPEAKER_BUFFER_OVERFLOW(7, "PCM受信バッファがあふれました"),
+    CAPTION_QUEUE_OVERFLOW(8, "字幕キューがあふれました");
+
+    companion object {
+        fun descriptionFor(wireValue: Int): String =
+            entries.firstOrNull { it.wireValue == wireValue }?.description ?: "不明なエラーです"
+    }
+}
+
 class StackChanRemoteException(
     val errorCode: Int,
     val streamId: Int = 0,
-) : IOException("CoreS3がエラーを返しました。code=$errorCode, stream=$streamId")
+) : IOException(
+    "CoreS3がエラーを返しました。" +
+        "code=$errorCode (${StackChanErrorCode.descriptionFor(errorCode)}), stream=$streamId",
+)
 
 enum class StackChanControl(val wireValue: Int) {
     HELLO(1), HELLO_ACK(2), ERROR(3),

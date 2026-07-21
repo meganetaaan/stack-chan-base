@@ -69,13 +69,14 @@ payloadは1 byteで、`IDLE=0`、`RECOGNIZING=1`、`SPEAKING=2`とする。
 
 Firmwareのスピーカーqueueは1秒分である。
 `SPEAKER_CREDIT` payloadは新たに送信可能になったbytes数を表す増分値である。
-未消費creditの上限は12 KiBとし、Firmwareのnative USB受信ringに収まるburstへ制限する。
+未消費creditの上限は8 KiBとし、Firmwareのnative USB受信ringに収まるburstへ制限する。
 Androidはcreditを消費してからPCMを送り、FirmwareはPCM queueに空きが生じた分だけcreditを返す。
 Androidは最大5秒分のPCMを送信待ちqueueへ保持し、Piper合成をcredit待ちから分離する。
 一つのPCM frameに必要なcreditが15秒更新されない場合は、その再生をエラーとして中断する。
 Firmwareは500 ms分をprebufferしてから再生を開始する。
 短い発話は`SPEAKER_END`を受信した時点で、500 ms未満でも再生を開始する。
 USBのpollとフレーム処理はCore 1の高優先度Workerで行う。
+Firmwareは32 KiBのnative USB受信ringから16 KiBずつ、1回のpollで最大4回読み出す。
 WorkerはWebRadioと同じ64 KiBの共有ringへPCMを渡し、main VMが実機の`AudioOut`へ書き込む。
 `AudioOut`の書き込み可能bytes数はPCM queueが空でも保持し、次のPCM受信時に排出を再開する。
 
@@ -83,6 +84,10 @@ Firmwareは対応するPCMを`AudioOut`へ書き込む直前に字幕を最大2�
 実再生中は自律表情を停止し、PCMのRMSを0.1刻み、125 ms間隔で口の開きへ反映する。
 再生完了または`SPEAKER_ABORT`で吹き出しを消し、口を閉じて自律表情を再開する。
 認識中は回転インジケーター、発話中はスピーカーアイコンを顔画面へ表示する。
+
+`ERROR` payloadは4 bytesのcodeである。
+code 6はスピーカーPCMのsequence欠落、code 7はPCM受信buffer超過、code 8は字幕queue超過を表す。
+Androidはcodeと対象stream IDを再生traceおよび画面のエラーへ残す。
 
 ## 接続確認
 
