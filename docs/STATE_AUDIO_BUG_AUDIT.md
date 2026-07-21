@@ -87,6 +87,23 @@ AndroidではActivityの単一性、接続世代、マイク順序とoverflow、
 Firmwareではspeaker session、Worker応答、送信queue、wire codecを純粋関数として検査した。
 状態照合を除いたbroken variantでは有限列挙が反例を検出し、修正版では同じ反例が成立しないことを確認した。
 
+## 最終検証記録
+
+Firmwareの修正は、2026年7月22日時点の`origin/develop`、コミット`4ae98b20`の上へリベースした。
+Androidでは`test`、`lint`、`assembleDebug`が成功し、接続中のMotorola端末へのAPK上書きに成功した。
+同じ端末へ`MainActivity`の起動要求を2回送る試験では、2回目が既存instanceへ配送され、task内のinstanceは1個だった。
+Firmwareでは219件のunit test、70件のarchitecture test、6 targetのmanifest検査が成功した。
+CoreS3 release buildは成功し、`xs_esp32.bin`は`0x5bf980` bytes、最小app partitionの空きは63%だった。
+
+許可対象MAC`44:1B:F6:E2:82:B0`のCoreS3を全消去してからFirmwareを書き込み、USB protocol version 2のhandshakeが成功した。
+通常Firmwareは最大payload 4,096 bytes、capability `0x0000037f`を返した。
+音量0の診断Firmwareへ24 kHz、16-bit、monoのPCMを30秒送った結果、送信量、Firmware受信量、AudioOut書込量はすべて1,440,000 bytesで一致した。
+この試験は`SPEAKER_DONE`まで到達し、starvationは0回だった。
+診断CSVは`firmware/dist/usb-audio-diagnostics/v2-burst-30s-20260722.csv`へ保存し、SHA-256は`165d4d0ea652052ca625a5b0323a6570e675eeedb946fc748c5bd392aa2b2539`である。
+試験後は音量0.25の通常Firmwareへ戻し、書込hashとversion 2 handshakeを再確認した。
+
+AndroidとCoreS3を直接つないだ会話全経路の再確認は、両機をPCへ接続した現在の配線では実施していない。
+
 ## 検査の自己確認
 
 状態遷移の全列挙テストには、stream照合を意図的に外したbroken variantを含める。
