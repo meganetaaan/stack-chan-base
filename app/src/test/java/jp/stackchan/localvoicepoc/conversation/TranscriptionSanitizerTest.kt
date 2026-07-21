@@ -13,6 +13,9 @@ class TranscriptionSanitizerTest {
             ),
         )
         assertNull(TranscriptionSanitizer.sanitize("[MUSIC]"))
+        assertNull(TranscriptionSanitizer.sanitize("("))
+        assertNull(TranscriptionSanitizer.sanitize("(音楽"))
+        assertNull(TranscriptionSanitizer.sanitize("（ノイズ"))
     }
 
     @Test
@@ -22,5 +25,6 @@ class TranscriptionSanitizerTest {
             TranscriptionSanitizer.sanitize("  こんにちは   (background noise) "),
         )
         assertEquals("Hello", TranscriptionSanitizer.sanitize("Hello"))
+        assertEquals("音楽について教えて", TranscriptionSanitizer.sanitize("音楽について教えて"))
     }
 }

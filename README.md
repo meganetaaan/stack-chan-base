@@ -3,7 +3,7 @@
 Android端末だけで、完全ローカルの日本語音声会話を動かすためのPoCです。
 
 ```text
-Android microphone (16 kHz PCM)
+M5Stack CoreS3 microphone (16 kHz PCM, USB CDC)
         ↓
 WebRTC VAD (20 ms frames) + adaptive RMS
         ↓
@@ -12,13 +12,13 @@ sherpa-onnx Whisper Small multilingual（language=ja）
 LiteRT-LM 0.14.0 / Gemma 4 E2BまたはE4B IT（GPU優先、CPU退避）
         ↓ streamed Japanese text
 Piper Plus Android AAR + Japanese voice model
-        ↓ PCM16
-Android AudioTrack
+        ↓ PCM16（既定24 kHzへ変換）
+M5Stack CoreS3 AudioOut (USB CDC)
 ```
 
-M5StackChanとのUSBシリアル接続は次の段階です。音声I/Oは`PcmAudioSource`と
-`PcmAudioSink`で分離してあり、Androidマイク／スピーカーをUSB実装へ交換できます。
-`StackChanFrameCodec`にはPCM・制御・表情・動作用のフレーム形式も含めています。
+Android端末をUSBホスト、M5Stack CoreS3をUSB Serial/JTAGデバイスとして接続します。
+会話パイプラインの音声I/Oには`SerialPcmAudioSource`と`SerialPcmAudioSink`を使います。
+USB切断時は会話を停止し、再接続後に画面から通信を再試行できます。
 
 ## 実装済み
 
@@ -31,10 +31,11 @@ M5StackChanとのUSBシリアル接続は次の段階です。音声I/Oは`PcmAu
 - ランタイムに依存しない`LocalLanguageModel`境界と4ターンの短期履歴
 - LiteRT-LMの会話セッションを再利用するストリーミング生成
 - Gemmaのthinking無効化
-- 句点単位でのPiper Plus逐次合成とAudioTrack再生
+- 句点単位でのPiper Plus逐次合成とCoreS3 AudioOut再生
 - タップ式Push-to-Talk
 - WebRTC VADの20 msフレームと適応RMS判定を使う自動発話区切り
 - 350 ms未満のクリック音などを破棄し、15秒の強制打ち切りまで待たない誤検出処理
+- Whisperへ渡したPCMのWAV保存と、認識結果を対応付けるJSON metadata
 - 自動会話中の「発話待ち」「発話中」表示
 - Whisperの非音声字幕だけで構成された認識結果の破棄
 - LLMの初回ページ読み込みをモデル準備中に行うウォームアップ
@@ -44,7 +45,13 @@ M5StackChanとのUSBシリアル接続は次の段階です。音声I/Oは`PcmAu
 - 推論・再生の中断
 - 推奨Piper Plus音声のダウンロード、SHA-256検証、辞書展開、自動ロード
 - Piper音声モデル、JSON設定、OpenJTalk辞書のStorage Access Framework取込
-- USBシリアル向けバイナリフレームcodecと単体テスト
+- USB CDCの自動検出、権限取得、HELLO handshake、切断処理
+- CoreS3マイクの16 kHz PCM受信とsequence欠損時の無音補完
+- Piper出力を24 kHzへ逐次変換し、5秒のproducer queueとcredit制御でCoreS3へ送る処理
+- 発話中の口パク、自律表情の一時停止、文単位の吹き出し表示
+- CoreS3側の認識中・発話中アイコン表示
+- Piper PCM長とUSB再生終了理由を記録するJSON Lines trace
+- USBシリアル向けバイナリフレームcodec、破損復帰parser、単体テスト
 
 ## 開発環境
 
@@ -52,6 +59,8 @@ M5StackChanとのUSBシリアル接続は次の段階です。音声I/Oは`PcmAu
 - `curl`、`tar`、`unzip`
 - Android Studio（IDEを使う場合）
 - arm64-v8a Android端末、Android 8.0以上
+- USBホスト機能を持つAndroid端末とデータ通信対応USBケーブル
+- USB音声対応Firmwareを書き込んだM5Stack CoreS3
 - 初回モデル取得時のみインターネット接続
 - Piper Plus Android AAR
 - 任意音声を手動設定する場合は、Piper Plus互換の日本語`.onnx`、対応する`.json`、OpenJTalk辞書
@@ -111,7 +120,24 @@ Android Studioでルートディレクトリを開くか、CLIを使います。
 `gradle-wrapper.jar`はプロジェクトに含めています。
 Gradle 8.13の配布ZIPは`gradle-wrapper.properties`に記録したSHA-256と照合します。
 
-## 3. 端末上でセットアップする
+## 3. CoreS3をUSB接続する
+
+CoreS3側は、stack-chan Firmwareの`feat/android-usb-audio` worktreeにある専用manifestを使います。
+
+```bash
+cd /path/to/stack-chan-firmware/firmware
+source "$HOME/.local/share/xs-dev-export.sh"
+npm ci
+npm run build:android-usb-audio
+npm run flash:android-usb-audio
+```
+
+書き込み後、Android端末をUSBホストとしてCoreS3へ接続します。
+初回はアプリがUSBデバイスの利用許可を求めます。
+画面の「CoreS3 USB」が「接続済み（PCM 16kHz入力／24kHz出力）」になれば会話を開始できます。
+通信仕様と障害時の確認方法は[USB CDC音声通信](docs/SERIAL_NEXT_STEP.md)を参照してください。
+
+## 4. 端末上でセットアップする
 
 1. 「E2B（速度重視）」または「E4B（品質重視）」を選びます。
    E2Bは応答速度、E4Bは会話品質を比較するための選択肢です。
@@ -123,7 +149,7 @@ Gradle 8.13の配布ZIPは`gradle-wrapper.properties`に記録したSHA-256と�
 3. 「推奨音声をダウンロードして準備」を実行します。
    初回はつくよみちゃんコーパスの利用条件を確認します。
    アプリが音声モデル、設定JSON、辞書ZIPを取得し、SHA-256検証、辞書展開、Piper Plusロードまで実行します。
-4. 「録音開始」→発話→「録音終了・応答」で最初の会話を確認します。
+4. CoreS3のマイクへ向けて「録音開始」→発話→「録音終了・応答」で最初の会話を確認します。
 5. Push-to-Talkが安定した後に「自動VAD」を有効にします。
 
 任意のPiper Plus音声を使う場合は、「任意音声の手動設定」からONNX、JSON、OpenJTalk辞書を取り込み、「Piper Plusをロード」を実行します。
@@ -166,6 +192,32 @@ Android側の単体テストは、SDK環境で実行します。
 ./scripts/dev.sh ./gradlew :app:testDebugUnitTest
 ```
 
+## 音声診断ファイル
+
+アプリはWhisperへ渡した16 kHz PCMを、次の端末内ディレクトリへWAVとして保存します。
+
+```text
+/sdcard/Android/data/jp.stackchan.localvoicepoc/files/voice-diagnostics/recognition-captures/
+```
+
+同名のJSONには、自動VADまたはPush-to-Talkの区別、音声長、Whisperの生出力、除外後の認識結果、エラーを記録します。
+WAVはpre-rollと終端無音を含め、Whisperへ実際に渡したbyte列と一致します。
+保存件数は直近50件、WAV合計は50 MiBまでです。
+
+TTS再生の調査記録は次へ保存します。
+
+```text
+/sdcard/Android/data/jp.stackchan.localvoicepoc/files/voice-diagnostics/playback-traces/
+```
+
+JSON LinesにはPiper入力sample数、24 kHz変換後のPCM長、送信frame数、`SPEAKER_END`、`SPEAKER_DONE`、`SPEAKER_ABORT`、終了理由を時系列で記録します。
+再生が数秒で終了した場合は、`inputDurationMs`でPiperが返した音声長を確認し、`all_pcm_sent`、`speaker_end_sent`、`speaker_done_received`、`speaker_abort_sent`の順序から終了箇所を判定できます。
+PCへ回収する場合は次のコマンドを使います。
+
+```bash
+adb pull /sdcard/Android/data/jp.stackchan.localvoicepoc/files/voice-diagnostics ./voice-diagnostics
+```
+
 ## 検証状況
 
 - Piper Plus v1.13.0 AARを組み込んだdebug APK生成は通過
@@ -187,6 +239,8 @@ Android側の単体テストは、SDK環境で実行します。
 
 ## PoCの境界
 
-この段階ではAndroid端末のマイクとスピーカーを使う半二重会話です。M5StackChanの
-USB CDC接続、M5側PCM再生、表情・サーボ同期は未接続ですが、差し替え境界と
-フレームcodecは用意しています。詳細は`docs/SERIAL_NEXT_STEP.md`を参照してください。
+この段階ではCoreS3のマイクとスピーカーを使う半二重会話です。
+USB発話の口パクと吹き出しは実装していますが、感情表現、サーボ同期、AEC、再生中の割り込み発話には対応していません。
+基本的なUSB音声対話は実機で確認済みです。
+80 ms送信と500 ms prebufferによる連続再生は、音量0の実機診断で8 kHz、16 kHz、24 kHzともstarvation 0回を確認しています。
+Android実機では、変更後の可聴音、口パク、吹き出し、USB抜き差し、各Piperモデルのsample rateを再確認する必要があります。

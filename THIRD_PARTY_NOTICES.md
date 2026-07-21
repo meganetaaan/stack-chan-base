@@ -11,6 +11,7 @@
 - sherpa-onnx v1.12.20（Apache License 2.0。Kotlin API定義の一部を変更して使用）
 - Whisper Small ONNX model
 - android-vad WebRTC 2.0.10
+- usb-serial-for-android 3.10.0（MIT License）
 - Piper Plus Android AAR
 - Piper Plusつくよみちゃん6言語FP16音声モデル（つくよみちゃんコーパス利用条件）
 - OpenJTalk dictionary from the Piper Plus v1.13.0 release archive

@@ -12,12 +12,12 @@ MainActivity / Compose UI
 MainViewModel
         │ events / commands
 ConversationEngine
- ├─ PcmAudioSource       ← AndroidMicrophoneSource
+ ├─ PcmAudioSource       ← SerialPcmAudioSource / CoreS3 microphone
  ├─ EndpointDetector     ← WebRTC VADと適応RMS
  ├─ LocalSpeechRecognizer← sherpa-onnx Whisper Small
  ├─ LocalLanguageModel   ← LiteRT-LM / Gemma 4 E2BまたはE4B
  ├─ SpeechSynthesizer    ← PiperPlusReflectionSynthesizer
- └─ PcmAudioSink         ← AndroidPcmAudioSink
+ └─ PcmAudioSink         ← SerialPcmAudioSink / CoreS3 AudioOut
 ```
 
 `ConversationEngine`は推論SDKをimportせず、`LocalLanguageModel`と`LocalSpeechRecognizer`だけを参照します。
@@ -47,9 +47,18 @@ LISTENING/RECORDING
   → LISTENING or IDLE
 ```
 
-音声認識は16kHz、16bit、mono PCMです。LLM出力はストリームで受信し、
-`SentenceChunker`が日本語の句点・疑問符・感嘆符で安定した文を切り出します。
+音声認識はCoreS3からUSB CDCで受信する16kHz、16bit、mono PCMです。
+LLM出力はストリームで受信し、`SentenceChunker`が日本語の句点・疑問符・感嘆符で安定した文を切り出します。
 各文をPiper Plusへ送り、全文生成の完了前に読み上げを開始します。
+Piperのsample rateはAndroid側で既定24kHzへ逐次変換します。
+変換後PCMは80ms単位にまとめて最大5秒のproducer queueへ入れ、USB送信だけをCoreS3のcreditで制御します。
+これにより、Piperの次文合成は直前の文がCoreS3で消費されるまで待ちません。
+
+CoreS3はUSBのpoll、フレーム処理、CRC32計算をCore 1の高優先度Workerで実行します。
+Workerは1秒分のPCM queueへ500msをprebufferし、64KiBの共有ringを介してmain VMの`AudioOut`へ渡します。
+`AudioOut`の未使用書き込み可能量は次のUSB frame到着まで保持します。
+各文のUTF-8字幕はPCMと同じqueue順序で処理し、対応するPCMを書き込む直前に吹き出しへ表示します。
+実再生中は自律表情を停止し、PCMのRMSから口の開きを更新します。
 
 Gemmaのthinkingは、LiteRT-LMのテンプレートコンテキスト`enable_thinking=false`で無効にします。
 会話制御にはGemma固有のプロンプト記法を置きません。
@@ -78,10 +87,10 @@ revisionまたはPiper Plusの固定版を変更した場合は、利用条件�
 
 中断操作では、次をまとめて止めます。
 
-- AudioRecord
+- CoreS3マイクのUSBストリーム
 - LiteRT-LM Conversation generation
 - Piper Plus側の次回出力
-- AudioTrackの再生キュー
+- CoreS3 AudioOutのUSB再生キュー
 - 会話セッションcoroutine
 
 Piper Plusのone-shot native推論そのものを強制終了するAPIは使っていないため、合成中の

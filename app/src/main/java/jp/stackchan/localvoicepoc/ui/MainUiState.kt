@@ -18,6 +18,14 @@ data class ComponentProgress(
     val fraction: Float = 0f,
 )
 
+enum class UsbConnectionStatus {
+    DISCONNECTED,
+    PERMISSION_PENDING,
+    CONNECTING,
+    READY,
+    ERROR,
+}
+
 data class MainUiState(
     val sdkStatus: SdkBootstrap.Status = SdkBootstrap.Status.Starting,
     val selectedGemmaModel: GemmaModelSpec = GemmaModelManifest.default,
@@ -36,10 +44,13 @@ data class MainUiState(
     val phase: ConversationPhase = ConversationPhase.IDLE,
     val audioLevel: Float = 0f,
     val automaticMode: Boolean = false,
+    val usbStatus: UsbConnectionStatus = UsbConnectionStatus.DISCONNECTED,
+    val usbError: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val assistantDraft: String = "",
     val error: String? = null,
 ) {
     val pipelineReady: Boolean
-        get() = sdkStatus is SdkBootstrap.Status.Ready && modelsReady && piperLoaded
+        get() = sdkStatus is SdkBootstrap.Status.Ready && modelsReady && piperLoaded &&
+            usbStatus == UsbConnectionStatus.READY
 }

@@ -109,13 +109,19 @@ Piper Plus上流にはストリーミングC APIと音素タイミング出力�
 
 LLMの高速化後は、この二点が最初の可聴音までの遅延として残る。
 
-### シリアルcodecはパケット単位に限られる
+### USB音声経路は実装済みであり、長時間の実機検証が残る
 
 [StackChanFrame.kt](../app/src/main/java/jp/stackchan/localvoicepoc/serial/StackChanFrame.kt)は、フレームのエンコード、デコード、CRC検査を実装している。
 
-USBから届く任意長のバイト列を連続的に読み、途中フレームを保持し、破損後に再同期する処理はまだない。
+[StackChanProtocol.kt](../app/src/main/java/jp/stackchan/localvoicepoc/serial/StackChanProtocol.kt)は、任意長のUSB受信、途中フレームの保持、破損後の再同期を実装している。
 
-センサーイベント、再生位置、フロー制御、動作の安全条件も未定義である。
+CoreS3のマイクPCM、スピーカーPCM、HELLO、capability、credit flow control、切断時の会話停止も実装済みである。
+
+基本的なUSB音声対話は実機で確認済みである。
+発話PCMはAndroid側のproducer queue、CoreS3側の500 ms prebuffer、Workerとmain VM間の共有ringで平滑化する。
+文単位の吹き出しとPCMレベルによる口パクも実装済みである。
+
+10分間の実機連続動作、再生位置、センサーイベント、動作の安全条件は未検証または未実装である。
 
 ## 目標コンポーネント
 
@@ -451,17 +457,19 @@ lengthはCAPABILITIESで合意した上限とアプリ側の絶対上限の小�
 
 22.05kHzのTTS出力は一方向44,100 bytes/sである。
 
-921,600 baudを8N1で使う場合、理論上の一方向上限は92,160 bytes/sだが、USB CDC実装、firmwareのtask、フレーム処理の損失を含まない。
+USB CDCの転送量は設定baud rateだけでは決まらず、USB実装、Firmware task、フレーム処理の損失に左右される。
 
-実装前に一方向と全二重の持続throughputを測り、sample rateを16kHzまたは22.05kHzから交渉する。
+現行実装はスピーカーに8 kHz、16 kHz、24 kHzを受け付け、マイクを16 kHzに固定している。
 
 20ミリ秒の16kHz PCMは640 bytesであり、現在の24 bytesのフレーム付加情報はpayload比で約3.8パーセントになる。
+スピーカーは80ミリ秒単位で送り、24 kHz PCMの3,840 bytesに対する付加情報を約0.63パーセントに抑える。
 
 スピーカー再生にはPLAY_BEGIN、SPEAKER_PCM、PLAY_END、PLAY_CANCELを使う。
 
 スタックチャンは受信可能なbuffer時間またはcreditを通知し、Androidはその範囲を超えて送らない。
 
-bufferは遅延を隠すほど大きくせず、初期値を100ミリ秒から200ミリ秒としてunderflowと操作遅延を測る。
+現行値は1秒queue、500ミリ秒prebuffer、12 KiBのcredit windowである。
+音量0の15秒実機診断ではstarvation 0回を確認しており、Android実機で操作遅延との釣り合いを再評価する。
 
 第一段階は半二重PCMとし、TTS再生中はマイク音声をASRへ渡さない。
 
@@ -688,11 +696,11 @@ firstPcmとfirstAudibleを別に測り、口の動きを再生PCMへ同期する
 
 判定条件は、音質の破綻を増やさずTTSのp95目標を満たすことである。
 
-### Phase 5
+### Phase 5（実装済み、実機判定待ち）
 
-FrameStreamDecoder、USB接続状態機械、HELLO、CAPABILITIES、SPEAKER_PCMを実装する。
+FrameStreamDecoder、USB接続状態機械、HELLO、CAPABILITIES、SPEAKER_PCMを実装した。
 
-スピーカーが安定した後にMICROPHONE_PCMを追加する。
+MICROPHONE_PCMを追加し、Androidの音声Source/SinkをCoreS3へ切り替えた。
 
 半二重で10分間の音声入出力を行い、sequence gap、CRC error、underflow、切断復帰を記録する。
 

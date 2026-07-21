@@ -2,13 +2,14 @@ package jp.stackchan.localvoicepoc
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import jp.stackchan.localvoicepoc.audio.AndroidMicrophoneSource
-import jp.stackchan.localvoicepoc.audio.AndroidPcmAudioSink
 import jp.stackchan.localvoicepoc.conversation.ConversationEngine
 import jp.stackchan.localvoicepoc.conversation.ConversationEvent
 import jp.stackchan.localvoicepoc.conversation.ConversationPhase
+import jp.stackchan.localvoicepoc.diagnostics.PlaybackTraceStore
+import jp.stackchan.localvoicepoc.diagnostics.RecognitionCaptureStore
 import jp.stackchan.localvoicepoc.model.GemmaModelManifest
 import jp.stackchan.localvoicepoc.model.GemmaModelPreferences
 import jp.stackchan.localvoicepoc.model.LiteRtGemmaLanguageModel
@@ -17,9 +18,17 @@ import jp.stackchan.localvoicepoc.model.ModelSetupManager
 import jp.stackchan.localvoicepoc.piper.PiperAssetStore
 import jp.stackchan.localvoicepoc.piper.PiperPlusReflectionSynthesizer
 import jp.stackchan.localvoicepoc.speech.SherpaWhisperRecognizer
+import jp.stackchan.localvoicepoc.serial.SerialPcmAudioSink
+import jp.stackchan.localvoicepoc.serial.SerialPcmAudioSource
+import jp.stackchan.localvoicepoc.serial.StackChanCapabilities
+import jp.stackchan.localvoicepoc.serial.StackChanControl
+import jp.stackchan.localvoicepoc.serial.StackChanStatus
+import jp.stackchan.localvoicepoc.serial.StackChanUsbConnection
+import jp.stackchan.localvoicepoc.serial.StackChanUsbState
 import jp.stackchan.localvoicepoc.ui.ChatMessage
 import jp.stackchan.localvoicepoc.ui.ComponentProgress
 import jp.stackchan.localvoicepoc.ui.MainUiState
+import jp.stackchan.localvoicepoc.ui.UsbConnectionStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
@@ -28,21 +37,39 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val voiceDiagnosticsDirectory = application.getExternalFilesDir("voice-diagnostics")
+        ?: File(application.filesDir, "voice-diagnostics")
+    private val recognitionCaptureStore = RecognitionCaptureStore(
+        File(voiceDiagnosticsDirectory, "recognition-captures"),
+    )
+    private val playbackTraceStore = PlaybackTraceStore(
+        File(voiceDiagnosticsDirectory, "playback-traces"),
+    )
     private val gemmaPreferences = GemmaModelPreferences(application)
     private val speechRecognizer = SherpaWhisperRecognizer()
     private val languageModel = LiteRtGemmaLanguageModel(application)
     private val modelManager = ModelSetupManager(application, speechRecognizer, languageModel)
     private val piperStore = PiperAssetStore(application)
     private val synthesizer = PiperPlusReflectionSynthesizer(application)
+    private val usbConnection = StackChanUsbConnection(application)
+    private val serialAudioSource = SerialPcmAudioSource(usbConnection)
+    private val serialAudioSink = SerialPcmAudioSink(
+        connection = usbConnection,
+        playbackTraceStore = playbackTraceStore,
+    )
     private val engine = ConversationEngine(
-        audioSource = AndroidMicrophoneSource(),
-        audioSink = AndroidPcmAudioSink(),
+        audioSource = serialAudioSource,
+        audioSink = serialAudioSink,
         synthesizer = synthesizer,
         speechRecognizer = speechRecognizer,
         languageModel = languageModel,
+        recognitionCaptureStore = recognitionCaptureStore,
     )
 
     private val mutableState = MutableStateFlow(
@@ -52,8 +79,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ),
     )
     val state: StateFlow<MainUiState> = mutableState.asStateFlow()
+    private val stackChanStatusMutex = Mutex()
+    private var lastStackChanStatus: StackChanStatus? = null
 
     init {
+        Log.i(TAG, "Voice diagnostics directory: ${voiceDiagnosticsDirectory.absolutePath}")
         refreshPiperFiles()
         viewModelScope.launch {
             SdkBootstrap.status.collect { status ->
@@ -62,6 +92,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             engine.events.collect(::handleConversationEvent)
+        }
+        viewModelScope.launch {
+            usbConnection.state.collect { connectionState ->
+                val (status, error) = when (connectionState) {
+                    StackChanUsbState.Disconnected -> UsbConnectionStatus.DISCONNECTED to null
+                    StackChanUsbState.PermissionPending -> UsbConnectionStatus.PERMISSION_PENDING to null
+                    StackChanUsbState.Connecting -> UsbConnectionStatus.CONNECTING to null
+                    is StackChanUsbState.Ready -> UsbConnectionStatus.READY to null
+                    is StackChanUsbState.Error -> UsbConnectionStatus.ERROR to connectionState.message
+                }
+                mutableState.update { it.copy(usbStatus = status, usbError = error) }
+                lastStackChanStatus = null
+                if (connectionState is StackChanUsbState.Ready) {
+                    syncStackChanStatus(mutableState.value.phase)
+                }
+                if (status != UsbConnectionStatus.READY && mutableState.value.phase != ConversationPhase.IDLE) {
+                    engine.stop()
+                }
+            }
         }
     }
 
@@ -241,6 +290,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update { it.copy(error = null) }
     }
 
+    fun retryUsbConnection() {
+        usbConnection.retry()
+    }
+
     private fun launchPiperOperation(block: suspend () -> Unit) {
         if (mutableState.value.piperBusy) return
         mutableState.update {
@@ -355,8 +408,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun handleConversationEvent(event: ConversationEvent) {
         when (event) {
-            is ConversationEvent.PhaseChanged -> mutableState.update {
-                it.copy(phase = event.phase, audioLevel = if (event.phase == ConversationPhase.IDLE) 0f else it.audioLevel)
+            is ConversationEvent.PhaseChanged -> {
+                mutableState.update {
+                    it.copy(
+                        phase = event.phase,
+                        audioLevel = if (event.phase == ConversationPhase.IDLE) 0f else it.audioLevel,
+                    )
+                }
+                syncStackChanStatus(event.phase)
             }
             is ConversationEvent.AudioLevel -> mutableState.update {
                 it.copy(audioLevel = (event.rms * 12f).coerceIn(0f, 1f))
@@ -387,8 +446,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun syncStackChanStatus(phase: ConversationPhase) {
+        stackChanStatusMutex.withLock {
+            val ready = usbConnection.state.value as? StackChanUsbState.Ready ?: return
+            if (ready.capabilities and StackChanCapabilities.STATUS_ICON == 0) return
+            val status = when (phase) {
+                ConversationPhase.TRANSCRIBING -> StackChanStatus.RECOGNIZING
+                ConversationPhase.SPEAKING -> StackChanStatus.SPEAKING
+                else -> StackChanStatus.IDLE
+            }
+            if (status == lastStackChanStatus) return
+            val sent = withContext(Dispatchers.IO) {
+                runCatching {
+                    usbConnection.sendControl(
+                        StackChanControl.STATUS,
+                        payload = byteArrayOf(status.wireValue.toByte()),
+                    )
+                }
+            }
+            sent.onSuccess { lastStackChanStatus = status }
+                .onFailure { error -> Log.w(TAG, "Could not update Stack-chan status icon", error) }
+        }
+    }
+
     override fun onCleared() {
         engine.close()
+        serialAudioSource.close()
+        serialAudioSink.close()
+        usbConnection.close()
         super.onCleared()
+    }
+
+    private companion object {
+        const val TAG = "MainViewModel"
     }
 }

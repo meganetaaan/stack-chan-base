@@ -1,11 +1,36 @@
 package jp.stackchan.localvoicepoc.conversation
 
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class UtteranceAccumulatorTest {
+    @Test
+    fun usesActualTwentyMillisecondFrameDurations() {
+        val accumulator = UtteranceAccumulator()
+        val frame = ByteArray(640)
+
+        repeat(18) { assertNull(accumulator.accept(frame, true, durationMs = 20)) }
+        repeat(39) { assertNull(accumulator.accept(frame, false, durationMs = 20)) }
+        val utterance = accumulator.accept(frame, false, durationMs = 20)
+
+        assertNotNull(utterance)
+        assertEquals(58 * frame.size, utterance?.size)
+    }
+
+    @Test
+    fun rejectsAnEightyMillisecondImpulseFromTwentyMillisecondFrames() {
+        val accumulator = UtteranceAccumulator()
+        val frame = ByteArray(640)
+
+        repeat(4) { assertNull(accumulator.accept(frame, true, durationMs = 20)) }
+        repeat(40) { assertNull(accumulator.accept(frame, false, durationMs = 20)) }
+
+        assertFalse(accumulator.isCapturing)
+    }
+
     @Test
     fun emitsAfterMinimumSpeechAndTrailingSilence() {
         val accumulator = UtteranceAccumulator(

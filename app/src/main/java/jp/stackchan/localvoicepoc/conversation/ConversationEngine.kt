@@ -1,7 +1,11 @@
 package jp.stackchan.localvoicepoc.conversation
 
+import android.util.Log
 import jp.stackchan.localvoicepoc.audio.PcmAudioSink
 import jp.stackchan.localvoicepoc.audio.PcmAudioSource
+import jp.stackchan.localvoicepoc.diagnostics.RecognitionCapture
+import jp.stackchan.localvoicepoc.diagnostics.RecognitionCaptureStore
+import jp.stackchan.localvoicepoc.diagnostics.RecognitionCaptureTrigger
 import jp.stackchan.localvoicepoc.model.DialogueMessage
 import jp.stackchan.localvoicepoc.model.GenerationRequest
 import jp.stackchan.localvoicepoc.model.LocalLanguageModel
@@ -26,6 +30,8 @@ import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.ArrayDeque
 
@@ -35,6 +41,7 @@ class ConversationEngine(
     private val synthesizer: SpeechSynthesizer,
     private val speechRecognizer: LocalSpeechRecognizer,
     private val languageModel: LocalLanguageModel,
+    private val recognitionCaptureStore: RecognitionCaptureStore? = null,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val detector = EndpointDetector()
@@ -57,7 +64,7 @@ class ConversationEngine(
                 while (isActive) {
                     emitPhase(ConversationPhase.LISTENING)
                     val audio = captureAutomaticUtterance()
-                    processUtterance(audio)
+                    processUtterance(audio, RecognitionCaptureTrigger.AUTOMATIC)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -67,8 +74,10 @@ class ConversationEngine(
                 )
             } finally {
                 audioSource.stop()
-                audioSink.stop()
-                emitPhase(ConversationPhase.IDLE)
+                withContext(NonCancellable) {
+                    audioSink.abort()
+                    emitPhase(ConversationPhase.IDLE)
+                }
             }
         }
     }
@@ -113,7 +122,7 @@ class ConversationEngine(
                 return@launch
             }
             try {
-                processUtterance(audio)
+                processUtterance(audio, RecognitionCaptureTrigger.PUSH_TO_TALK)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -129,7 +138,7 @@ class ConversationEngine(
     suspend fun stop() {
         audioSource.stop()
         synthesizer.cancel()
-        audioSink.stop()
+        audioSink.abort()
         languageModel.cancel()
         pushToTalkJob?.cancelAndJoin()
         sessionJob?.cancelAndJoin()
@@ -147,7 +156,7 @@ class ConversationEngine(
                 mutableEvents.tryEmit(ConversationEvent.AudioLevel(Pcm.rms16Le(chunk)))
                 val speech = detector.isSpeech(chunk)
                 val wasCapturing = accumulator.isCapturing
-                val result = accumulator.accept(chunk, speech)
+                val result = accumulator.accept(chunk, speech, chunkDurationMilliseconds(chunk))
                 when {
                     !wasCapturing && accumulator.isCapturing -> emitPhase(ConversationPhase.RECORDING)
                     wasCapturing && !accumulator.isCapturing && result == null -> {
@@ -160,11 +169,22 @@ class ConversationEngine(
             .also { audioSource.stop() }
     }
 
-    private suspend fun processUtterance(audio: ByteArray) {
+    private suspend fun processUtterance(
+        audio: ByteArray,
+        trigger: RecognitionCaptureTrigger,
+    ) {
+        val capture = saveRecognitionCapture(audio, trigger)
         emitPhase(ConversationPhase.TRANSCRIBING)
-        val transcription = TranscriptionSanitizer.sanitize(
-            speechRecognizer.transcribe(audio, audioSource.sampleRate),
-        ) ?: return
+        var rawTranscription: String? = null
+        val transcription = try {
+            rawTranscription = speechRecognizer.transcribe(audio, audioSource.sampleRate)
+            TranscriptionSanitizer.sanitize(rawTranscription).also { sanitized ->
+                recordRecognitionResult(capture, rawTranscription, sanitized)
+            }
+        } catch (error: Throwable) {
+            recordRecognitionResult(capture, rawTranscription, null, error)
+            throw error
+        } ?: return
         mutableEvents.emit(ConversationEvent.UserText(transcription))
 
         emitPhase(ConversationPhase.THINKING)
@@ -182,19 +202,34 @@ class ConversationEngine(
         var audioBegun = false
 
         val speaker = launch(Dispatchers.IO) {
+            var synthesisCompleted = false
             try {
                 for (sentence in sentenceChannel) {
+                    var captionSent = false
                     synthesizer.synthesize(sentence).collect { chunk ->
                         if (!audioBegun) {
                             audioSink.begin(chunk.sampleRate)
                             audioBegun = true
                             emitPhase(ConversationPhase.SPEAKING)
                         }
+                        if (!captionSent) {
+                            audioSink.setCaption(sentence)
+                            captionSent = true
+                        }
                         audioSink.write(chunk.samples)
                     }
                 }
+                synthesisCompleted = true
             } finally {
-                if (audioBegun) audioSink.finish()
+                if (audioBegun) {
+                    withContext(NonCancellable) {
+                        if (synthesisCompleted) {
+                            audioSink.finish()
+                        } else {
+                            audioSink.abort()
+                        }
+                    }
+                }
             }
         }
 
@@ -232,6 +267,43 @@ class ConversationEngine(
         mutableEvents.emit(ConversationEvent.PhaseChanged(phase))
     }
 
+    private fun chunkDurationMilliseconds(chunk: ByteArray): Int {
+        val bytesPerSecond = audioSource.sampleRate * audioSource.channelCount * audioSource.bytesPerSample
+        return (chunk.size.toLong() * 1_000L / bytesPerSecond).toInt().coerceAtLeast(1)
+    }
+
+    private suspend fun saveRecognitionCapture(
+        audio: ByteArray,
+        trigger: RecognitionCaptureTrigger,
+    ): RecognitionCapture? {
+        val store = recognitionCaptureStore ?: return null
+        return try {
+            store.save(audio, audioSource.sampleRate, trigger)
+        } catch (error: Throwable) {
+            Log.w(TAG, "Could not save recognition capture", error)
+            null
+        }
+    }
+
+    private suspend fun recordRecognitionResult(
+        capture: RecognitionCapture?,
+        rawTranscription: String?,
+        sanitizedTranscription: String?,
+        error: Throwable? = null,
+    ) {
+        if (capture == null) return
+        try {
+            recognitionCaptureStore?.recordRecognitionResult(
+                capture,
+                rawTranscription,
+                sanitizedTranscription,
+                error,
+            )
+        } catch (storageError: Throwable) {
+            Log.w(TAG, "Could not update recognition capture metadata", storageError)
+        }
+    }
+
     override fun close() {
         audioSource.stop()
         detector.close()
@@ -243,6 +315,7 @@ class ConversationEngine(
     }
 
     private companion object {
+        const val TAG = "ConversationEngine"
         const val MAX_HISTORY_TURNS = 4
         const val SYSTEM_PROMPT =
             "あなたは手のひらサイズのロボット『ｽﾀｯｸﾁｬﾝ』です。" +

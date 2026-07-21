@@ -29,9 +29,9 @@ data class StackChanFrame(
 object StackChanFrameCodec {
     private const val MAGIC = 0x5343 // ASCII "SC"
     private const val VERSION = 1
-    private const val HEADER_BYTES = 20
-    private const val CRC_BYTES = 4
-    const val MAX_PAYLOAD_BYTES = 256 * 1024
+    const val HEADER_BYTES = 20
+    const val CRC_BYTES = 4
+    const val MAX_PAYLOAD_BYTES = 4 * 1024
 
     fun encode(frame: StackChanFrame): ByteArray {
         require(frame.payload.size <= MAX_PAYLOAD_BYTES) { "Payload is too large" }

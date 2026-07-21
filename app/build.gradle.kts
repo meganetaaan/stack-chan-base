@@ -83,6 +83,7 @@ dependencies {
     implementation(libs.runanywhere.onnx)
     implementation(libs.litert.lm)
     implementation(libs.webrtc.vad)
+    implementation(libs.usb.serial)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)

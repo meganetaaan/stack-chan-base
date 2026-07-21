@@ -31,6 +31,13 @@ required = [
     "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperAssetLinks.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperPlusReflectionSynthesizer.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/serial/StackChanFrame.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/serial/StackChanProtocol.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/serial/StackChanUsbConnection.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/serial/StackChanUsbTransport.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/serial/SerialPcmAudioSource.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/serial/SerialPcmAudioSink.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/util/StreamingPcmResampler.kt",
+    "app/src/main/res/xml/usb_device_filter.xml",
     "app/src/main/java/jp/stackchan/localvoicepoc/speech/LocalSpeechRecognizer.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/speech/SherpaWhisperRecognizer.kt",
     "app/src/main/java/com/k2fsa/sherpa/onnx/SherpaOfflineApi.kt",
@@ -53,7 +60,9 @@ if missing:
 manifest_path = root / "app/src/main/AndroidManifest.xml"
 manifest = manifest_path.read_text(encoding="utf-8")
 ET.parse(manifest_path)
-assert "android.permission.RECORD_AUDIO" in manifest
+assert "android.permission.RECORD_AUDIO" not in manifest
+assert "android.hardware.usb.host" in manifest
+assert "android.hardware.usb.action.USB_DEVICE_ATTACHED" in manifest
 assert "StackChanApplication" in manifest
 assert "libOpenCL.so" in manifest
 assert "libvndksupport.so" in manifest
@@ -68,6 +77,8 @@ assert re.search(r'litertLm\s*=\s*"0\.14\.0"', versions)
 assert re.search(r'webrtcVad\s*=\s*"2\.0\.10"', versions)
 assert 'abiFilters += "arm64-v8a"' in app_gradle
 assert "runanywhere.llamacpp" not in app_gradle
+assert "libs.usb.serial" in app_gradle
+assert re.search(r'usbSerial\s*=\s*"3\.10\.0"', versions)
 
 catalog = (root / "app/src/main/java/jp/stackchan/localvoicepoc/model/ModelCatalog.kt").read_text(
     encoding="utf-8"

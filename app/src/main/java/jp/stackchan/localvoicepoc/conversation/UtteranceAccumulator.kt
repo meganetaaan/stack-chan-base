@@ -10,7 +10,10 @@ class UtteranceAccumulator(
     private val minimumSpeechMs: Int = 350,
     private val maximumUtteranceMs: Int = 15_000,
 ) {
-    private val preRoll = ArrayDeque<ByteArray>()
+    private data class TimedChunk(val bytes: ByteArray, val durationMs: Int)
+
+    private val preRoll = ArrayDeque<TimedChunk>()
+    private var preRollDurationMs = 0
     private var utterance = ByteArrayOutputStream()
     private var started = false
     private var speechMs = 0
@@ -20,28 +23,37 @@ class UtteranceAccumulator(
     val isCapturing: Boolean
         get() = started
 
-    fun accept(chunk: ByteArray, speech: Boolean): ByteArray? {
+    fun accept(
+        chunk: ByteArray,
+        speech: Boolean,
+        durationMs: Int = chunkDurationMs,
+    ): ByteArray? {
+        require(durationMs > 0) { "Chunk duration must be positive" }
         if (!started) {
-            preRoll.addLast(chunk.copyOf())
-            while (preRoll.size * chunkDurationMs > preRollMs) preRoll.removeFirst()
+            preRoll.addLast(TimedChunk(chunk.copyOf(), durationMs))
+            preRollDurationMs += durationMs
+            while (preRollDurationMs > preRollMs && preRoll.size > 1) {
+                preRollDurationMs -= preRoll.removeFirst().durationMs
+            }
             if (!speech) return null
 
             started = true
-            preRoll.forEach { buffered -> utterance.write(buffered) }
-            speechMs = chunkDurationMs
-            totalMs = preRoll.size * chunkDurationMs
+            preRoll.forEach { buffered -> utterance.write(buffered.bytes) }
+            speechMs = durationMs
+            totalMs = preRollDurationMs
             silenceMs = 0
             preRoll.clear()
+            preRollDurationMs = 0
             return null
         }
 
         utterance.write(chunk)
-        totalMs += chunkDurationMs
+        totalMs += durationMs
         if (speech) {
-            speechMs += chunkDurationMs
+            speechMs += durationMs
             silenceMs = 0
         } else {
-            silenceMs += chunkDurationMs
+            silenceMs += durationMs
         }
 
         val silenceReached = silenceMs >= endSilenceMs
@@ -61,6 +73,7 @@ class UtteranceAccumulator(
 
     fun reset() {
         preRoll.clear()
+        preRollDurationMs = 0
         utterance = ByteArrayOutputStream()
         started = false
         speechMs = 0

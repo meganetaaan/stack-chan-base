@@ -1,6 +1,6 @@
 # 検証記録
 
-更新日：2026年7月14日
+更新日：2026年7月21日
 
 対象LLM：Gemma 4 E2BおよびE4B IT、LiteRT-LM 0.14.0
 
@@ -12,10 +12,11 @@ Linux x86_64上のプロジェクトローカル環境で、次の検査を実�
 
 - `python3 scripts/check_project.py`
   - 必須ファイル、Manifest、Gradle設定、固定モデル情報、Piper Plus AARのSHA-256を検査
-  - Kotlinソース50ファイルを検出
+  - Kotlinソース60ファイルを検出
 - `./scripts/dev.sh ./gradlew :app:testDebugUnitTest`
-  - 19 tests、0 failures、0 errors
-  - 文分割、発話区切り、短い音響インパルスの破棄、Whisper非音声字幕の除外を検査
+  - 37 tests、0 failures、0 errors
+  - 文分割、実際の20 ms単位での発話区切り、短い音響インパルスの破棄、Whisper非音声字幕の除外を検査
+  - 認識WAVと再生trace、12秒分のPCM送信、Firmwareエラー時の再生中断を検査
   - PCM変換、シリアルフレーム、Piper配布物、辞書ZIPの安全な展開、E2BとE4Bのrevision、サイズ、SHA-256定義を検査
 - `./scripts/dev.sh ./gradlew :app:assembleDebug`
   - JDK 17.0.19
@@ -32,11 +33,11 @@ Linux x86_64上のプロジェクトローカル環境で、次の検査を実�
   - 1件はarm64-v8a限定APKに対するChromeOS x86_64 ABIの通知
   - 実装コードに対する警告は0件
 
-生成したdebug APKは86,630,308 bytesである。
+生成したdebug APKは86,798,317 bytesである。
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
-SHA-256: 9c8159b6643ecb569a72355ae9a1f29756c0429e55487fafad550f9b3427e36c
+SHA-256: 6a979e2387d79ff9bc1b46c22b4ed50f2f2ad3f0ecd2e569324a00b7588d420f
 ```
 
 ## Gemmaモデル取得情報の検査
@@ -139,6 +140,50 @@ STTはsherpa-onnx 1.12.20を直接呼び出し、認識器生成時に`language=
 旧Qwen3 4Bのモデルロードは3.226秒、初回ウォームアップは15.260秒、OSページキャッシュ後の再実行は3.323秒だった。
 
 RunAnywhere ONNX、Piper Plus JNI、WebRTC VADの同一プロセスでのロードも確認済みである。
+
+## CoreS3 USB音声経路
+
+Androidのdebug unit testで、Firmwareと共通のwire vector、断片受信、複数frame結合、CRC破損後の再同期を確認した。
+同じtestで16 kHzから24 kHzへの補間値、22.05 kHz入力のchunk境界、24 kHzの無変換経路を確認した。
+
+CoreS3 Firmwareでは207件のunit testと69件のarchitecture testが成功した。
+release manifestをESP-IDF 6.0でbuildし、6,018,928 bytes（`0x5BD770`）のESP32-S3 imageを生成した。
+SHA-256は`75e1980957ceae11b5cff1a7d6945d1cea15a3681f85b5d7def5cc76b75e251b`である。
+app partitionには63%の空きがある。
+
+motorola razr 50 ultraとCoreS3をUSB接続し、CoreS3のマイク入力、スピーカー出力、音声対話の基本経路を確認した。
+
+再生平滑化の変更後は、Androidのunit testで字幕とPCMの順序、80 msのPCM分割、旧Firmwareとの互換性、credit停止中のproducer queueを確認した。
+CoreS3 Firmwareでは、Workerと共有ringの責務、保持した`AudioOut`書き込み可能量、字幕順序、口パク量子化をunit testとarchitecture testで確認した。
+CoreS3向けrelease buildと、自律表情停止中の口更新を含むModdable testも成功した。
+
+音量0の実機診断では、UIを有効にした状態で24 kHz、15.04秒、721,920 bytesを約14.99秒のAudioOut書き込み区間で処理した。
+受信bytesと書き込みbytesは一致し、starvationは0回だった。
+8 kHzと16 kHzの8秒再生、および24 kHzの吹き出し付き8秒再生でもbytesは一致し、starvationは0回だった。
+
+今回報告された「途切れる」は音声の一部が欠落する現象ではなく、再生セッションが数秒で終了する現象である。
+PCから送った15.04秒の固定長PCMはCoreS3で最後まで再生されたため、CoreS3単体の持続再生経路では早期終了を再現していない。
+
+Androidは、Piper合成が正常に最後まで終わった場合だけ`SPEAKER_END`を送る。
+合成の取消しまたは例外時は、部分PCMを正常終了として扱わず、同期的に`SPEAKER_ABORT`を送る。
+新しい再生を開始する前には、前回の遅延`SPEAKER_ABORT`が終わるまで待つ。
+単体テストでは12秒分の全PCM frameが`SPEAKER_END`より前に送られることと、Firmwareの`ERROR`がcredit待ちを直ちに解除することを確認した。
+
+端末には、Piper入力sample数、24 kHz変換後のPCM長、送信frame数、`SPEAKER_END`、`SPEAKER_DONE`、`SPEAKER_ABORT`、例外をJSON Linesで保存する。
+この記録により、Piperが短いPCMを返した場合、Androidが途中終了した場合、CoreS3が先に終了した場合を区別できる。
+
+自動VADでは、CoreS3から届くPCM chunkが20 msであるにもかかわらず、発話蓄積器が1 chunkを100 msとして数えていた。
+そのため、350 msの発話開始条件は実時間で約80 ms、15秒の上限は実時間で約3秒になっていた。
+修正版はchunk byte数、sample rate、channel数、sample幅から実時間を計算し、VADの初期校正を300 msにした。
+Whisperへ渡した音声はWAV、その認識結果と除外理由はJSONとして端末へ保存する。
+
+release Firmwareの`speakerVolume`は0.25である。
+認識中は回転インジケーター、発話中はスピーカーアイコンを表示する。
+
+対象CoreS3（MAC address `44:1B:F6:E2:82:B0`）にはrelease Firmwareを書き込み、`HELLO_ACK`のcapability `0x0000017f`と三つの状態通知を確認した。
+motorola razr 50 ultraには上記debug APKを`adb install -r`で上書きし、起動を確認した。
+
+AndroidとCoreS3を直接接続した状態では、再生早期終了、0.25音量、認識中・発話中アイコン、口パク、吹き出し、診断ファイル生成を再確認する必要がある。
 
 ## E4Bで残る性能検査
 

@@ -59,6 +59,7 @@ fun StackChanScreen(
     onStopConversation: () -> Unit,
     onStartPushToTalk: () -> Unit,
     onStopPushToTalk: () -> Unit,
+    onRetryUsbConnection: () -> Unit,
     onDismissError: () -> Unit,
 ) {
     Scaffold(
@@ -94,6 +95,7 @@ fun StackChanScreen(
                     onStopConversation = onStopConversation,
                     onStartPushToTalk = onStartPushToTalk,
                     onStopPushToTalk = onStopPushToTalk,
+                    onRetryUsbConnection = onRetryUsbConnection,
                 )
             }
             if (state.messages.isEmpty() && state.assistantDraft.isBlank()) {
@@ -367,6 +369,7 @@ private fun ConversationControls(
     onStopConversation: () -> Unit,
     onStartPushToTalk: () -> Unit,
     onStopPushToTalk: () -> Unit,
+    onRetryUsbConnection: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -391,6 +394,19 @@ private fun ConversationControls(
                     enabled = state.phase == ConversationPhase.IDLE,
                     onCheckedChange = onAutomaticModeChanged,
                 )
+            }
+
+            StatusLine("CoreS3 USB", usbStatusLabel(state))
+            state.usbError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            if (state.usbStatus == UsbConnectionStatus.DISCONNECTED || state.usbStatus == UsbConnectionStatus.ERROR) {
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onRetryUsbConnection,
+                ) {
+                    Text("USB接続を再試行")
+                }
             }
 
             LinearProgressIndicator(
@@ -428,6 +444,14 @@ private fun ConversationControls(
             }
         }
     }
+}
+
+private fun usbStatusLabel(state: MainUiState): String = when (state.usbStatus) {
+    UsbConnectionStatus.DISCONNECTED -> "未接続"
+    UsbConnectionStatus.PERMISSION_PENDING -> "権限確認中"
+    UsbConnectionStatus.CONNECTING -> "接続中"
+    UsbConnectionStatus.READY -> "接続済み（PCM 16kHz入力／24kHz出力）"
+    UsbConnectionStatus.ERROR -> "通信エラー"
 }
 
 @Composable

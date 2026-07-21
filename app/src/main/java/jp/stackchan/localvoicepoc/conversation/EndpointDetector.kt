@@ -68,7 +68,8 @@ class EndpointDetector(
     private companion object {
         const val FRAME_SAMPLES = 320 // 20 ms at 16 kHz; a valid WebRTC VAD frame.
         const val FRAME_BYTES = FRAME_SAMPLES * 2
-        const val CALIBRATION_CHUNKS = 3
+        // CoreS3 sends 20 ms frames. Calibrate for up to the first 300 ms.
+        const val CALIBRATION_CHUNKS = 15
         const val INITIAL_NOISE_FLOOR = 0.0015f
         const val NOISE_HISTORY_WEIGHT = 0.95f
     }
