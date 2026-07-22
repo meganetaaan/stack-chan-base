@@ -69,7 +69,7 @@ payloadは1 byteで、`IDLE=0`、`RECOGNIZING=1`、`SPEAKING=2`とする。
 
 Firmwareのスピーカーqueueは1秒分である。
 `SPEAKER_CREDIT` payloadは新たに送信可能になったbytes数を表す増分値である。
-未消費creditの上限は8 KiBとし、Firmwareのnative USB受信ringに収まるburstへ制限する。
+未消費creditの上限は8 KiBとし、一回の送信量がFirmwareのnative USB受信ringに収まるよう制限する。
 Androidはcreditを消費してからPCMを送り、FirmwareはPCM queueに空きが生じた分だけcreditを返す。
 Androidは最大5秒分のPCMを送信待ちqueueへ保持し、Piper合成をcredit待ちから分離する。
 一つのPCM frameに必要なcreditが15秒更新されない場合は、その再生をエラーとして中断する。
@@ -88,6 +88,17 @@ Firmwareは対応するPCMを`AudioOut`へ書き込む直前に字幕を最大2�
 `ERROR` payloadは4 bytesのcodeである。
 code 6はスピーカーPCMのsequence欠落、code 7はPCM受信buffer超過、code 8は字幕queue超過を表す。
 Androidはcodeと対象stream IDを再生traceおよび画面のエラーへ残す。
+
+再生traceのschema version 2は、各`UsbSerialPort.write`について、要求byte数、完了byte数、queue投入時刻、実write開始時刻、完了時刻、frame種別、control、stream ID、sequence、sample rate、payload byte数を記録する。
+時刻は再生trace開始からのmicrosecond単位の相対値である。
+送信処理へのファイルI/O混入を避けるため、記録は再生中にメモリへ保持し、再生の終了または失敗時にJSONLへまとめて保存する。
+traceにはPCM本体と字幕本文を保存しない。
+字幕については文字数とUTF-8 byte数だけを保存する。
+一つのtraceは10,000 eventまでとし、超過分がある場合は`trace_truncated`へ件数を記録する。
+
+保存先はアプリの`voice-diagnostics/playback-traces`ディレクトリである。
+PCへ取得したschema version 2のtraceは、Firmwareリポジトリの`usb-audio-diagnostics.py --replay-trace`で再生できる。
+PC側はPCM本体を無音で再生成し、記録されたwrite境界と`startedElapsedUs`の間隔を再現する。
 
 ## 接続確認
 

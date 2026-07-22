@@ -21,8 +21,37 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import java.nio.file.Files
 
 class SerialPcmAudioSinkTest {
+    @Test
+    fun recordsActualUsbWriteSizesAndMonotonicTiming() = runBlocking {
+        val directory = Files.createTempDirectory("speaker-usb-writes").toFile()
+        try {
+            val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+            val sink = SerialPcmAudioSink(
+                transport,
+                playbackTraceStore = jp.stackchan.localvoicepoc.diagnostics.PlaybackTraceStore(directory),
+            )
+
+            sink.begin(24_000)
+            sink.write(ShortArray(1_920))
+            sink.finish()
+
+            val trace = directory.listFiles().orEmpty().single().readText()
+            assertTrue(trace.contains("\"event\":\"usb_write\""))
+            assertTrue(trace.contains("\"control\":\"SPEAKER_START\""))
+            assertTrue(trace.contains("\"frameType\":\"SPEAKER_PCM\""))
+            assertTrue(trace.contains("\"requestedBytes\":3864"))
+            assertTrue(trace.contains("\"payloadBytes\":3840"))
+            assertTrue(trace.contains("\"startedElapsedUs\":"))
+            assertTrue(trace.contains("\"writeDurationUs\":"))
+            sink.close()
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     @Test
     fun sendsCaptionImmediatelyBeforeItsPcm() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL)
@@ -257,6 +286,7 @@ class SerialPcmAudioSinkTest {
             StackChanUsbState.Ready(maxPayload, capabilities),
         )
         private val mutableFrames = MutableSharedFlow<StackChanFrame>(extraBufferCapacity = 32)
+        private var writeObserver: StackChanUsbWriteObserver? = null
         val sent = CopyOnWriteArrayList<StackChanFrame>()
         val pcmWriteEntered = CompletableDeferred<Unit>()
         val releasePcmWrite = CompletableDeferred<Unit>()
@@ -264,6 +294,10 @@ class SerialPcmAudioSinkTest {
 
         override val state: StateFlow<StackChanUsbState> = mutableState
         override val frames: SharedFlow<StackChanFrame> = mutableFrames
+
+        override fun setWriteObserver(observer: StackChanUsbWriteObserver?) {
+            writeObserver = observer
+        }
 
         override suspend fun send(frame: StackChanFrame) {
             if (blockPcmWrites && frame.type == StackChanFrame.Type.SPEAKER_PCM) {
@@ -275,6 +309,7 @@ class SerialPcmAudioSinkTest {
             } else {
                 sent += frame
             }
+            notifyWrite(frame)
             if (replenishCredit && frame.type == StackChanFrame.Type.SPEAKER_PCM) {
                 mutableFrames.emit(
                     controlFrame(
@@ -293,7 +328,9 @@ class SerialPcmAudioSinkTest {
             payload: ByteArray,
             streamId: Int,
         ) {
-            sent += controlFrame(control, sampleRate, payload, streamId)
+            val frame = controlFrame(control, sampleRate, payload, streamId)
+            sent += frame
+            notifyWrite(frame)
             when (control) {
                 StackChanControl.SPEAKER_START -> {
                     currentSpeakerStream = streamId
@@ -316,6 +353,21 @@ class SerialPcmAudioSinkTest {
         suspend fun emitError(errorCode: Int = 3, streamId: Int = currentSpeakerStream) {
             mutableFrames.emit(
                 controlFrame(StackChanControl.ERROR, 0, uint32Payload(errorCode), streamId),
+            )
+        }
+
+        private fun notifyWrite(frame: StackChanFrame) {
+            val now = System.nanoTime()
+            val bytes = StackChanFrameCodec.HEADER_BYTES + frame.payload.size + StackChanFrameCodec.CRC_BYTES
+            writeObserver?.onWrite(
+                StackChanUsbWriteRecord(
+                    frame = frame,
+                    queuedAtNanos = now,
+                    startedAtNanos = now + 1_000,
+                    completedAtNanos = now + 2_000,
+                    requestedBytes = bytes,
+                    writtenBytes = bytes,
+                ),
             )
         }
 

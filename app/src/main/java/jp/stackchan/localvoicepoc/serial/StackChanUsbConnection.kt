@@ -60,6 +60,7 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
     private var ioManager: SerialInputOutputManager? = null
     private var handshakeTimeout: Job? = null
     private var receiverRegistered = false
+    @Volatile private var writeObserver: StackChanUsbWriteObserver? = null
 
     override val state: StateFlow<StackChanUsbState> = mutableState.asStateFlow()
     override val frames: SharedFlow<StackChanFrame> = mutableFrames.asSharedFlow()
@@ -117,11 +118,29 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
     }
 
     override suspend fun send(frame: StackChanFrame) {
+        val queuedAtNanos = System.nanoTime()
         val encoded = StackChanFrameCodec.encode(frame)
         writeMutex.withLock {
             val activePort = synchronized(portLock) { port } ?: throw IOException("ｽﾀｯｸﾁｬﾝは未接続です。")
+            val startedAtNanos = System.nanoTime()
             activePort.write(encoded, WRITE_TIMEOUT_MILLISECONDS)
+            runCatching {
+                writeObserver?.onWrite(
+                    StackChanUsbWriteRecord(
+                        frame = frame,
+                        queuedAtNanos = queuedAtNanos,
+                        startedAtNanos = startedAtNanos,
+                        completedAtNanos = System.nanoTime(),
+                        requestedBytes = encoded.size,
+                        writtenBytes = encoded.size,
+                    ),
+                )
+            }
         }
+    }
+
+    override fun setWriteObserver(observer: StackChanUsbWriteObserver?) {
+        writeObserver = observer
     }
 
     override suspend fun sendControl(

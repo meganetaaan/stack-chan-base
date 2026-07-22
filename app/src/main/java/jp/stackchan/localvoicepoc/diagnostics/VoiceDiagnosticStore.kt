@@ -246,26 +246,50 @@ class PlaybackTraceSession internal constructor(
     private val startedAtUtc: String,
 ) {
     private val startedNanos = System.nanoTime()
+    private val records = mutableListOf<Map<String, Any?>>()
+    private var droppedRecords = 0
     private var closed = false
+
+    init {
+        check(file.createNewFile()) { "Could not create playback trace: ${file.absolutePath}" }
+    }
 
     @Synchronized
     fun event(name: String, fields: Map<String, Any?> = emptyMap()) {
         if (closed) return
-        val record = linkedMapOf<String, Any?>(
-            "schemaVersion" to 1,
-            "sessionStartedAtUtc" to startedAtUtc,
-            "elapsedMs" to (System.nanoTime() - startedNanos) / 1_000_000L,
-            "event" to name,
-        )
-        record.putAll(fields)
-        file.appendText(DiagnosticJson.encode(record) + "\n", Charsets.UTF_8)
+        if (records.size >= MAX_BUFFERED_EVENTS - TERMINAL_EVENT_SLOTS) {
+            droppedRecords += 1
+            return
+        }
+        records += record(name, fields)
     }
+
+    fun elapsedMicros(monotonicNanos: Long): Long = ((monotonicNanos - startedNanos) / 1_000L).coerceAtLeast(0)
 
     @Synchronized
     fun close(outcome: String, fields: Map<String, Any?> = emptyMap()) {
         if (closed) return
-        event("session_closed", linkedMapOf<String, Any?>("outcome" to outcome).apply { putAll(fields) })
+        if (droppedRecords > 0) records += record("trace_truncated", mapOf("droppedRecords" to droppedRecords))
+        records += record("session_closed", linkedMapOf<String, Any?>("outcome" to outcome).apply { putAll(fields) })
         closed = true
+        val jsonLines = records.joinToString(separator = "\n", postfix = "\n", transform = DiagnosticJson::encode)
+        writeAtomically(file, jsonLines.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun record(name: String, fields: Map<String, Any?>): Map<String, Any?> {
+        val elapsedUs = elapsedMicros(System.nanoTime())
+        return linkedMapOf<String, Any?>(
+            "schemaVersion" to 2,
+            "sessionStartedAtUtc" to startedAtUtc,
+            "elapsedUs" to elapsedUs,
+            "elapsedMs" to elapsedUs / 1_000L,
+            "event" to name,
+        ).apply { putAll(fields) }
+    }
+
+    private companion object {
+        const val MAX_BUFFERED_EVENTS = 10_000
+        const val TERMINAL_EVENT_SLOTS = 2
     }
 }
 

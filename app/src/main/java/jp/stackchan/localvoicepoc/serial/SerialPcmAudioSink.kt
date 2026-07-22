@@ -52,6 +52,10 @@ class SerialPcmAudioSink(
     private var playbackDone: CompletableDeferred<Unit>? = null
     private var speakerTextSupported = false
     private var traceSession: PlaybackTraceSession? = null
+    private var traceWriteSession: PlaybackTraceSession? = null
+    private var usbWriteCount = 0
+    private var previousUsbWriteStartedNanos: Long? = null
+    private var previousUsbWriteCompletedNanos: Long? = null
     private var inputSampleRate = 0
     private var inputSamples = 0L
     private var outputPcmBytes = 0L
@@ -84,6 +88,8 @@ class SerialPcmAudioSink(
         availableCredit = 0
         playbackDone = CompletableDeferred()
         speakerTextSupported = ready.capabilities and StackChanCapabilities.SPEAKER_TEXT != 0
+        traceWriteSession = traceSession
+        connection.setWriteObserver(::recordUsbWrite)
         val sessionScope = CoroutineScope(currentCoroutineContext())
         collector = sessionScope.launch(start = CoroutineStart.UNDISPATCHED) {
             connection.frames.collect { frame -> handleFrame(frame) }
@@ -133,7 +139,7 @@ class SerialPcmAudioSink(
         captionCount += 1
         traceEvent(
             "caption_queued",
-            linkedMapOf("captionIndex" to captionCount, "text" to text, "utf8Bytes" to payload.size),
+            linkedMapOf("captionIndex" to captionCount, "characters" to text.length, "utf8Bytes" to payload.size),
         )
         enqueue(SpeakerItem.Caption(payload))
     }
@@ -298,6 +304,14 @@ class SerialPcmAudioSink(
                     return
                 }
                 receivedCreditBytes += credit
+                traceEvent(
+                    "speaker_credit_received",
+                    linkedMapOf(
+                        "creditBytes" to credit,
+                        "availableCreditBytes" to availableCredit,
+                        "receivedCreditBytes" to receivedCreditBytes,
+                    ),
+                )
                 creditChanged.trySend(Unit)
             }
             StackChanControl.SPEAKER_DONE -> {
@@ -394,6 +408,49 @@ class SerialPcmAudioSink(
         runCatching { traceSession?.event(name, fields) }
     }
 
+    private fun recordUsbWrite(record: StackChanUsbWriteRecord) {
+        val session = traceWriteSession ?: return
+        val queuedElapsedUs = session.elapsedMicros(record.queuedAtNanos)
+        val startedElapsedUs = session.elapsedMicros(record.startedAtNanos)
+        val completedElapsedUs = session.elapsedMicros(record.completedAtNanos)
+        val previousStarted = previousUsbWriteStartedNanos
+        val previousCompleted = previousUsbWriteCompletedNanos
+        usbWriteCount += 1
+        previousUsbWriteStartedNanos = record.startedAtNanos
+        previousUsbWriteCompletedNanos = record.completedAtNanos
+        runCatching {
+            session.event(
+                "usb_write",
+                linkedMapOf(
+                    "writeIndex" to usbWriteCount,
+                    "queuedElapsedUs" to queuedElapsedUs,
+                    "startedElapsedUs" to startedElapsedUs,
+                    "completedElapsedUs" to completedElapsedUs,
+                    "mutexWaitUs" to (record.startedAtNanos - record.queuedAtNanos) / 1_000L,
+                    "writeDurationUs" to (record.completedAtNanos - record.startedAtNanos) / 1_000L,
+                    "gapFromPreviousWriteStartUs" to previousStarted?.let { (record.startedAtNanos - it) / 1_000L },
+                    "gapFromPreviousWriteCompleteUs" to previousCompleted?.let {
+                        (record.startedAtNanos - it) / 1_000L
+                    },
+                    "requestedBytes" to record.requestedBytes,
+                    "writtenBytes" to record.writtenBytes,
+                    "frameType" to record.frame.type.name,
+                    "frameTypeValue" to record.frame.type.wireValue,
+                    "control" to if (record.frame.type == StackChanFrame.Type.CONTROL) {
+                        StackChanControl.fromWire(record.frame.flags)?.name
+                    } else {
+                        null
+                    },
+                    "flags" to record.frame.flags,
+                    "streamId" to record.frame.streamId,
+                    "sequence" to record.frame.sequence,
+                    "sampleRate" to record.frame.sampleRate,
+                    "payloadBytes" to record.frame.payload.size,
+                ),
+            )
+        }
+    }
+
     private fun closeTrace(outcome: String, error: Throwable? = null) {
         val session = traceSession
         traceSession = null
@@ -411,6 +468,8 @@ class SerialPcmAudioSink(
     }
 
     private fun cleanup() {
+        connection.setWriteObserver(null)
+        traceWriteSession = null
         outbound?.cancel()
         outbound = null
         sender?.cancel()
@@ -428,6 +487,9 @@ class SerialPcmAudioSink(
         speakerEndSent = false
         speakerDoneReceived = false
         activeStreamId = 0
+        usbWriteCount = 0
+        previousUsbWriteStartedNanos = null
+        previousUsbWriteCompletedNanos = null
         while (creditChanged.tryReceive().isSuccess) Unit
     }
 

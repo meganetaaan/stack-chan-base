@@ -41,11 +41,14 @@ class VoiceDiagnosticStoreTest {
             val trace = PlaybackTraceStore(directory, nowMillis = { 1_721_523_600_123L })
                 .start(22_050, 24_000)
             trace.event("speaker_end_sent", mapOf("sentPcmFrames" to 42))
+            assertEquals("", trace.file.readText())
             trace.close("completed")
 
             val lines = trace.file.readLines()
             assertEquals(3, lines.size)
             assertTrue(lines[0].contains("\"event\":\"session_started\""))
+            assertTrue(lines[0].contains("\"schemaVersion\":2"))
+            assertTrue(lines[0].contains("\"elapsedUs\":"))
             assertTrue(lines[1].contains("\"sentPcmFrames\":42"))
             assertTrue(lines[2].contains("\"outcome\":\"completed\""))
         } finally {
