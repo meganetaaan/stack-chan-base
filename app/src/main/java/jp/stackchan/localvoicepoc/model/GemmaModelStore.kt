@@ -82,11 +82,13 @@ class GemmaModelStore(
         modelFile
     }
 
-    private fun isTrustedExistingModel(): Boolean =
+    fun isPrepared(): Boolean =
         modelFile.isFile &&
             modelFile.length() == modelSpec.expectedBytes &&
             verifiedMarker.isFile &&
             verifiedMarker.readText().trim() == modelSpec.sha256
+
+    private fun isTrustedExistingModel(): Boolean = isPrepared()
 
     private fun ensureFreeSpace() {
         val downloadedBytes = partialFile.length().coerceAtMost(modelSpec.expectedBytes)

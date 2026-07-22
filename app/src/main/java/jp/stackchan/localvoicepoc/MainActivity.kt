@@ -8,12 +8,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import jp.stackchan.localvoicepoc.ui.StackChanScreen
+import jp.stackchan.localvoicepoc.ui.StackChanTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -21,7 +21,7 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
         setContent {
-            MaterialTheme {
+            StackChanTheme {
                 Surface(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
                     StackChanApp()
                 }
@@ -60,6 +60,8 @@ private fun StackChanApp(viewModel: MainViewModel = viewModel()) {
         onStartPushToTalk = viewModel::startPushToTalk,
         onStopPushToTalk = viewModel::stopPushToTalkAndProcess,
         onRetryUsbConnection = viewModel::retryUsbConnection,
+        onFinishSetup = viewModel::finishSetup,
+        onRetryStartup = viewModel::retryStartup,
         onDismissError = viewModel::clearError,
     )
 }

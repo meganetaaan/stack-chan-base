@@ -26,7 +26,23 @@ enum class UsbConnectionStatus {
     ERROR,
 }
 
+enum class AppStartupStatus {
+    CHECKING,
+    RESTORING,
+    SETUP_REQUIRED,
+    READY,
+    FAILED,
+}
+
+enum class SetupStep {
+    MODEL,
+    VOICE,
+    DEVICE,
+}
+
 data class MainUiState(
+    val startupStatus: AppStartupStatus = AppStartupStatus.CHECKING,
+    val startupMessage: String = "保存済みのデータを確認しています",
     val sdkStatus: SdkBootstrap.Status = SdkBootstrap.Status.Starting,
     val selectedGemmaModel: GemmaModelSpec = GemmaModelManifest.default,
     val modelProgress: Map<ModelComponent, ComponentProgress> =
@@ -56,4 +72,11 @@ data class MainUiState(
     val pipelineReady: Boolean
         get() = sdkStatus is SdkBootstrap.Status.Ready && modelsReady && piperLoaded &&
             usbStatus == UsbConnectionStatus.READY
+
+    val setupStep: SetupStep
+        get() = when {
+            !modelsReady -> SetupStep.MODEL
+            !piperLoaded -> SetupStep.VOICE
+            else -> SetupStep.DEVICE
+        }
 }

@@ -26,9 +26,13 @@ import jp.stackchan.localvoicepoc.serial.StackChanStatus
 import jp.stackchan.localvoicepoc.serial.StackChanUsbConnection
 import jp.stackchan.localvoicepoc.serial.StackChanUsbState
 import jp.stackchan.localvoicepoc.ui.ChatMessage
+import jp.stackchan.localvoicepoc.ui.AppPreferences
+import jp.stackchan.localvoicepoc.ui.AppStartupStatus
 import jp.stackchan.localvoicepoc.ui.ComponentProgress
 import jp.stackchan.localvoicepoc.ui.MainUiState
 import jp.stackchan.localvoicepoc.ui.UsbConnectionStatus
+import jp.stackchan.localvoicepoc.ui.StartupAssetDecision
+import jp.stackchan.localvoicepoc.ui.decideStartupAssets
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
@@ -52,6 +56,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         File(voiceDiagnosticsDirectory, "playback-traces"),
     )
     private val gemmaPreferences = GemmaModelPreferences(application)
+    private val appPreferences = AppPreferences(application)
     private val speechRecognizer = SherpaWhisperRecognizer()
     private val languageModel = LiteRtGemmaLanguageModel(application)
     private val modelManager = ModelSetupManager(application, speechRecognizer, languageModel)
@@ -81,6 +86,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<MainUiState> = mutableState.asStateFlow()
     private val stackChanStatusMutex = Mutex()
     private var lastStackChanStatus: StackChanStatus? = null
+    private var startupAttempted = false
 
     init {
         Log.i(TAG, "Voice diagnostics directory: ${voiceDiagnosticsDirectory.absolutePath}")
@@ -88,6 +94,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             SdkBootstrap.status.collect { status ->
                 mutableState.update { it.copy(sdkStatus = status) }
+                when (status) {
+                    SdkBootstrap.Status.Ready -> restorePreparedAssetsIfAvailable()
+                    is SdkBootstrap.Status.Failed -> mutableState.update {
+                        it.copy(
+                            startupStatus = AppStartupStatus.FAILED,
+                            startupMessage = "アプリの初期化に失敗しました",
+                        )
+                    }
+                    SdkBootstrap.Status.Starting -> Unit
+                }
             }
         }
         viewModelScope.launch {
@@ -134,7 +150,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 mutableState.update {
-                    it.copy(modelSetupRunning = false, modelsReady = true, error = null)
+                    it.copy(
+                        modelSetupRunning = false,
+                        modelsReady = true,
+                        startupStatus = AppStartupStatus.SETUP_REQUIRED,
+                        error = null,
+                    )
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -291,6 +312,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         usbConnection.retry()
     }
 
+    fun finishSetup() {
+        val current = mutableState.value
+        if (!current.modelsReady || !current.piperLoaded) return
+        appPreferences.markOnboardingComplete()
+        mutableState.update {
+            it.copy(
+                startupStatus = AppStartupStatus.READY,
+                startupMessage = "会話の準備ができました",
+            )
+        }
+    }
+
+    fun retryStartup() {
+        if (mutableState.value.sdkStatus !is SdkBootstrap.Status.Ready) return
+        startupAttempted = false
+        restorePreparedAssetsIfAvailable()
+    }
+
     private fun launchPiperOperation(block: suspend () -> Unit) {
         if (!mutableState.value.canStartModelMutation) return
         mutableState.update {
@@ -369,6 +408,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         piperBusy = false,
                         piperLoaded = true,
+                        startupStatus = AppStartupStatus.SETUP_REQUIRED,
                         piperProgress = ComponentProgress(stage = "準備完了", fraction = 1f),
                         error = null,
                     )
@@ -399,6 +439,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 piperConfigPresent = installation.config.isFile,
                 piperDictionaryPresent = installation.hasCompleteDictionary,
             )
+        }
+    }
+
+    private fun restorePreparedAssetsIfAvailable() {
+        if (startupAttempted) return
+        startupAttempted = true
+        val selectedModel = mutableState.value.selectedGemmaModel
+        val modelAssetsReady = runCatching { modelManager.hasPreparedAssets(selectedModel) }.getOrDefault(false)
+        val piperAssetsReady = piperStore.current().isComplete
+        if (
+            decideStartupAssets(
+                modelAssetsReady,
+                piperAssetsReady,
+                synthesizer.runtimeAvailable,
+            ) == StartupAssetDecision.SETUP_REQUIRED
+        ) {
+            mutableState.update {
+                it.copy(
+                    startupStatus = AppStartupStatus.SETUP_REQUIRED,
+                    startupMessage = "初回セットアップが必要です",
+                )
+            }
+            return
+        }
+
+        mutableState.update {
+            it.copy(
+                startupStatus = AppStartupStatus.RESTORING,
+                startupMessage = if (appPreferences.isOnboardingComplete()) {
+                    "会話モデルを読み込んでいます"
+                } else {
+                    "保存済みの会話モデルを読み込んでいます"
+                },
+                modelSetupRunning = true,
+                piperBusy = true,
+                error = null,
+            )
+        }
+        viewModelScope.launch {
+            try {
+                modelManager.prepareAll(selectedModel) { progress ->
+                    mutableState.update { current ->
+                        current.copy(
+                            modelProgress = current.modelProgress + (
+                                progress.component to ComponentProgress(progress.stage, progress.fraction)
+                            ),
+                        )
+                    }
+                }
+                mutableState.update {
+                    it.copy(
+                        modelsReady = true,
+                        modelSetupRunning = false,
+                        startupMessage = "音声を読み込んでいます",
+                    )
+                }
+                synthesizer.load(piperStore.current())
+                appPreferences.markOnboardingComplete()
+                mutableState.update {
+                    it.copy(
+                        piperLoaded = true,
+                        piperBusy = false,
+                        piperProgress = ComponentProgress("準備完了", 1f),
+                        startupStatus = AppStartupStatus.READY,
+                        startupMessage = "会話の準備ができました",
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        modelSetupRunning = false,
+                        piperBusy = false,
+                        startupStatus = AppStartupStatus.FAILED,
+                        startupMessage = "保存済みデータを読み込めませんでした",
+                        error = error.message ?: error::class.java.simpleName,
+                    )
+                }
+            }
         }
     }
 

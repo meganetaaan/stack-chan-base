@@ -84,9 +84,13 @@ dependencies {
     implementation(libs.litert.lm)
     implementation(libs.webrtc.vad)
     implementation(libs.usb.serial)
+    implementation(libs.compose.icons.lucide)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

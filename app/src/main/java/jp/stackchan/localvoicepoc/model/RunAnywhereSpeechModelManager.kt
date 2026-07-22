@@ -15,6 +15,12 @@ import java.io.File
 class RunAnywhereSpeechModelManager(
     private val speechRecognizer: LocalSpeechRecognizer,
 ) {
+    fun isPrepared(): Boolean {
+        val stt = registerStt()
+        CppBridgeModelRegistry.scanAndRestoreDownloadedModels()
+        return downloadedModelPath(stt.id) != null
+    }
+
     suspend fun prepare(onProgress: suspend (ModelPreparationProgress) -> Unit) {
         val stt = registerStt()
         CppBridgeModelRegistry.scanAndRestoreDownloadedModels()
