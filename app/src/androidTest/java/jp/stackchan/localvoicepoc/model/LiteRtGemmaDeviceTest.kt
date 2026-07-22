@@ -34,7 +34,7 @@ class LiteRtGemmaDeviceTest {
             val model = LiteRtGemmaLanguageModel(context)
             try {
                 withTimeout(TEST_TIMEOUT_MS) {
-                    val backend = model.prepare(modelFile)
+                    val backend = model.prepare(modelSpec, modelFile)
                     val response = StringBuilder()
                     model.generate(
                         GenerationRequest(

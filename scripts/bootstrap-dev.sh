@@ -79,7 +79,7 @@ yes | sdkmanager --licenses >/dev/null
 set -o pipefail
 sdkmanager \
   "platform-tools" \
-  "platforms;android-36" \
+  "platforms;android-37.0" \
   "build-tools;35.0.0"
 
 mkdir -p "$ROOT/.gradle"

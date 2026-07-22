@@ -56,7 +56,7 @@ class ConversationEngine(
     fun startAutomatic() {
         check(sessionJob?.isActive != true) { "A conversation session is already running" }
         check(synthesizer.isLoaded) { "Piper Plus is not loaded" }
-        check(languageModel.isLoaded) { "Gemma 4 is not loaded" }
+        check(languageModel.isLoaded) { "LLM is not loaded" }
 
         sessionJob = scope.launch {
             try {
@@ -85,7 +85,7 @@ class ConversationEngine(
         check(sessionJob?.isActive != true) { "Automatic conversation is running" }
         check(pushToTalkJob?.isActive != true) { "Push-to-talk recording is already running" }
         check(synthesizer.isLoaded) { "Piper Plus is not loaded" }
-        check(languageModel.isLoaded) { "Gemma 4 is not loaded" }
+        check(languageModel.isLoaded) { "LLM is not loaded" }
 
         val buffer = ByteArrayOutputStream()
         pushToTalkBuffer = buffer

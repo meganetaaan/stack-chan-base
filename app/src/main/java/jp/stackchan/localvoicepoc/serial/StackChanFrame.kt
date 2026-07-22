@@ -18,7 +18,8 @@ data class StackChanFrame(
         SPEAKER_PCM(2),
         EXPRESSION(3),
         MOTION(4),
-        DIAGNOSTICS(5);
+        DIAGNOSTICS(5),
+        EVENT(6);
 
         companion object {
             fun fromWire(value: Int): Type = entries.firstOrNull { it.wireValue == value }

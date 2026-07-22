@@ -21,6 +21,8 @@ required = [
     "app/src/main/java/jp/stackchan/localvoicepoc/model/GemmaModelManifest.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/GemmaModelPreferences.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/GemmaModelStore.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/model/AgentsA1LanguageModel.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/model/DeviceToolRegistry.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/LegacyModelCleaner.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/LiteRtGemmaLanguageModel.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/LosslessCallbackFlow.kt",
@@ -28,6 +30,7 @@ required = [
     "app/src/main/java/jp/stackchan/localvoicepoc/model/ModelCatalog.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/ModelSetupManager.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/model/RunAnywhereSpeechModelManager.kt",
+    "app/src/main/java/jp/stackchan/localvoicepoc/model/SelectableLanguageModel.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperAssetDownloader.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperDictionaryExtractor.kt",
     "app/src/main/java/jp/stackchan/localvoicepoc/piper/PiperAssetLinks.kt",
@@ -75,11 +78,11 @@ versions = (root / "gradle/libs.versions.toml").read_text(encoding="utf-8")
 assert "runanywhere" in app_gradle.lower()
 assert "litert" in app_gradle.lower()
 assert "piper-plus-release.aar" in app_gradle
-assert re.search(r'runanywhere\s*=\s*"0\.20\.6"', versions)
+assert re.search(r'runanywhere\s*=\s*"0\.20\.10"', versions)
 assert re.search(r'litertLm\s*=\s*"0\.14\.0"', versions)
 assert re.search(r'webrtcVad\s*=\s*"2\.0\.10"', versions)
 assert 'abiFilters += "arm64-v8a"' in app_gradle
-assert "runanywhere.llamacpp" not in app_gradle
+assert "runanywhere.llamacpp" in app_gradle
 assert "libs.usb.serial" in app_gradle
 assert re.search(r'usbSerial\s*=\s*"3\.10\.0"', versions)
 
@@ -118,6 +121,10 @@ for expected in [
     "3_659_530_240L",
     "0b2a8980ce155fd97673d8e820b4d29d9c7d99b8fa6806f425d969b145bd52e0",
     "f7ad3343bd6ebc9607f4dc3bc4f2398bd5749bc5",
+    "Agents-A1-4B-Q4_K_M.gguf",
+    "2_708_805_312L",
+    "d93c393a9bd5139a4b5cfe24d31ef553c5a497bfb8afec178a354ecbf508f062",
+    "d92b02e27074b27542384f72bc0e72203c970f0f",
 ]:
     assert expected in gemma_manifest, f"Gemma manifest is missing {expected}"
 

@@ -5,6 +5,8 @@ import jp.stackchan.localvoicepoc.conversation.ConversationPhase
 import jp.stackchan.localvoicepoc.model.GemmaModelManifest
 import jp.stackchan.localvoicepoc.model.GemmaModelSpec
 import jp.stackchan.localvoicepoc.model.ModelComponent
+import jp.stackchan.localvoicepoc.mcp.McpApprovalRequest
+import jp.stackchan.localvoicepoc.mcp.McpProfile
 
 data class ChatMessage(
     val role: Role,
@@ -62,6 +64,8 @@ data class MainUiState(
     val automaticMode: Boolean = false,
     val usbStatus: UsbConnectionStatus = UsbConnectionStatus.DISCONNECTED,
     val usbError: String? = null,
+    val mcpProfiles: List<McpProfile> = emptyList(),
+    val mcpApprovalRequest: McpApprovalRequest? = null,
     val messages: List<ChatMessage> = emptyList(),
     val assistantDraft: String = "",
     val error: String? = null,

@@ -134,7 +134,7 @@ class GemmaModelStore(
                     continue
                 }
                 check(responseCode == HttpURLConnection.HTTP_OK || responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                    "Gemma 4モデルの取得に失敗しました: HTTP $responseCode"
+                    "${modelSpec.name}の取得に失敗しました: HTTP $responseCode"
                 }
 
                 val append = responseCode == HttpURLConnection.HTTP_PARTIAL
@@ -204,11 +204,11 @@ class GemmaModelStore(
             val location = connection.getHeaderField("Location")
             connection.disconnect()
             check(!location.isNullOrBlank() && redirectCount < MAX_REDIRECTS) {
-                "Gemma 4モデルの取得先を解決できません"
+                "${modelSpec.name}の取得先を解決できません"
             }
             url = URL(url, location)
         }
-        error("Gemma 4モデルの取得でリダイレクト回数を超えました")
+        error("${modelSpec.name}の取得でリダイレクト回数を超えました")
     }
 
     private fun validateContentRange(connection: HttpURLConnection, expectedOffset: Long) {

@@ -39,8 +39,13 @@ class ModelSetupManager(
                 onProgress(ModelPreparationProgress(ModelComponent.LLM, stage, progress.fraction))
             }
 
-            onProgress(ModelPreparationProgress(ModelComponent.LLM, "GPU優先でロード中", 1f))
-            var backend = languageModel.prepare(modelFile)
+            val loadingStage = if (modelSpec.runtime == LanguageModelRuntime.LLAMA_CPP) {
+                "llama.cppでロード中"
+            } else {
+                "GPU優先でロード中"
+            }
+            onProgress(ModelPreparationProgress(ModelComponent.LLM, loadingStage, 1f))
+            var backend = languageModel.prepare(modelSpec, modelFile)
 
             onProgress(ModelPreparationProgress(ModelComponent.LLM, "ウォームアップ中", 1f))
             val initialWarmUp = tryWarmUp()
@@ -48,6 +53,7 @@ class ModelSetupManager(
                 val gpuError = requireNotNull(initialWarmUp.exceptionOrNull())
                 onProgress(ModelPreparationProgress(ModelComponent.LLM, "GPU生成失敗、CPUへ退避", 1f))
                 backend = languageModel.prepare(
+                    modelSpec,
                     modelFile,
                     preference = LanguageModelBackendPreference.CPU_ONLY,
                 )

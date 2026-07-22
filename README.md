@@ -9,7 +9,7 @@ WebRTC VAD (20 ms frames) + adaptive RMS
         ↓
 sherpa-onnx Whisper Small multilingual（language=ja）
         ↓
-LiteRT-LM 0.14.0 / Gemma 4 E2BまたはE4B IT（GPU優先、CPU退避）
+LiteRT-LM / Gemma 4、またはRunAnywhere llama.cpp / Agents A1 4B
         ↓ streamed Japanese text
 Piper Plus Android AAR + Japanese voice model
         ↓ PCM16（既定24 kHzへ変換）
@@ -22,11 +22,13 @@ USB切断時は会話を停止し、再接続後に画面から通信を再試�
 
 ## 実装済み
 
-- LiteRT-LM 0.14.0とGemma 4 E2BまたはE4B ITによるアプリ内LLM推論
-- E2BとE4Bの選択保存、およびモデルごとに独立した保存領域
+- Gemma 4 E2B/E4BとAgents A1 4Bを切り替えるアプリ内LLM推論
+- モデル選択の保存、およびモデルごとに独立した保存領域
 - GPU初期化、モデル能力に応じたMTP有効化、GPU失敗時のCPU退避
+- RunAnywhere SDK 0.20.10とllama.cppによるAgents A1 4B GGUF推論
+- Agents A1から利用できる現在日時／バッテリー状態の端末ツール
 - 選択したLLMを途中再開し、サイズとSHA-256を検証してから配置するアプリ内ダウンローダー
-- RunAnywhere SDK 0.20.6によるWhisperファイル管理とONNXバックエンド登録
+- RunAnywhere SDK 0.20.10によるWhisperファイル管理とONNXバックエンド登録
 - sherpa-onnxを直接使い、認識器生成時に`language=ja`を固定するバッチSTT
 - ランタイムに依存しない`LocalLanguageModel`境界と4ターンの短期履歴
 - LiteRT-LMの会話セッションを再利用するストリーミング生成
@@ -39,9 +41,9 @@ USB切断時は会話を停止し、再接続後に画面から通信を再試�
 - 自動会話中の「発話待ち」「発話中」表示
 - Whisperの非音声字幕だけで構成された認識結果の破棄
 - LLMの初回ページ読み込みをモデル準備中に行うウォームアップ
-- APK更新後に保存済みGemmaとWhisperを再利用する処理
+- APK更新後に保存済みLLMとWhisperを再利用する処理
 - 新経路の準備成功後に、旧版が保存したQwen3 4Bファイルだけを削除する移行処理
-- RunAnywhere SDK初期化後のテレメトリ無効化
+- RunAnywhere SDKをバックエンドURLのないdevelopment構成で初期化する処理
 - 推論・再生の中断
 - 推奨Piper Plus音声のダウンロード、SHA-256検証、辞書展開、自動ロード
 - Piper音声モデル、JSON設定、OpenJTalk辞書のStorage Access Framework取込
@@ -65,8 +67,8 @@ USB切断時は会話を停止し、再接続後に画面から通信を再試�
 - Piper Plus Android AAR
 - 任意音声を手動設定する場合は、Piper Plus互換の日本語`.onnx`、対応する`.json`、OpenJTalk辞書
 
-E2Bの配布ファイルは2,588,147,712 bytes、E4Bは3,659,530,240 bytesです。
-セットアップ開始時の空き容量は、E2Bで3.1GiB以上、E4Bで4.0GiB以上を目安にしてください。
+E2Bの配布ファイルは2,588,147,712 bytes、E4Bは3,659,530,240 bytes、Agents A1 4Bは2,708,805,312 bytesです。
+セットアップ開始時の空き容量は、E2BとAgents A1で3.2GiB以上、E4Bで4.0GiB以上を目安にしてください。
 両モデルは別々に保存されるため、両方を取得する場合はLiteRT-LMキャッシュ、Whisper、Piper Plusを含めて7GiB以上の余裕を確保してください。
 
 JDK 17とAndroid SDKはプロジェクト内の`.toolchains/`へ導入します。
@@ -77,7 +79,7 @@ CLIビルドのGradleキャッシュも`.gradle-user-home/`へ分離するため
 ./scripts/dev.sh java -version
 ```
 
-セットアップスクリプトはTemurin 17.0.19+10、Android Command-line Tools 14742923、Android SDK 36、Build Tools 35.0.0を固定して導入します。
+セットアップスクリプトはTemurin 17.0.19+10、Android Command-line Tools 14742923、Android SDK 37.0、Build Tools 35.0.0を固定して導入します。
 Android Studioから開く場合は、Gradle JDKに`.toolchains/temurin-17`を指定してください。
 
 ## 1. Piper Plus AARを確認する
@@ -118,7 +120,7 @@ Android Studioでルートディレクトリを開くか、CLIを使います。
 ```
 
 `gradle-wrapper.jar`はプロジェクトに含めています。
-Gradle 8.13の配布ZIPは`gradle-wrapper.properties`に記録したSHA-256と照合します。
+Gradle 9.5.0の配布ZIPは`gradle-wrapper.properties`に記録したSHA-256と照合します。
 
 ## 3. CoreS3をUSB接続する
 
@@ -139,10 +141,10 @@ npm run flash:android-usb-audio
 
 ## 4. 端末上でセットアップする
 
-1. 「E2B（速度重視）」または「E4B（品質重視）」を選びます。
-   E2Bは応答速度、E4Bは会話品質を比較するための選択肢です。
+1. 「E2B（速度重視）」「E4B（品質重視）」「A1（ツール対応）」から選びます。
+   A1は現在日時とバッテリー状態を必要に応じて端末から取得できます。
 2. 「モデルをダウンロードして準備」を実行します。
-   選択したGemma 4をアプリ内へ取得し、SHA-256検証、LiteRT-LMロード、初回ウォームアップまで行います。
+   選択したLLMをアプリ内へ取得し、SHA-256検証、対応ランタイムへのロード、初回ウォームアップまで行います。
    旧版のQwen3 4Bがアプリ内部に残っている場合は、新経路の準備成功後に削除して保存領域を回収します。
    中断したダウンロードは次回実行時に続きから再開します。
    GPUを利用できない端末ではCPUへ退避し、画面に実際のバックエンドを表示します。
@@ -154,7 +156,7 @@ npm run flash:android-usb-audio
 
 任意のPiper Plus音声を使う場合は、「任意音声の手動設定」からONNX、JSON、OpenJTalk辞書を取り込み、「Piper Plusをロード」を実行します。
 
-Gemmaはバックアップ対象外のアプリ内部ストレージ、Piper Plusのモデルと辞書は`files/piper-plus/`へ保存されます。
+LLMはバックアップ対象外のアプリ内部ストレージ、Piper Plusのモデルと辞書は`files/piper-plus/`へ保存されます。
 セットアップ後の推論、認識、合成はネットワークを使用しません。
 LLM-HubやAI Edge Galleryなど、別アプリのインストールや起動は不要です。
 
@@ -164,15 +166,16 @@ LLMの取得情報は`model/GemmaModelManifest.kt`、ASRの取得情報は`model
 
 | 用途 | 構成 |
 |---|---|
-| LLM | Gemma 4 E2BまたはE4B IT、LiteRT-LM 0.14.0、最大コンテキスト2,048 tokens |
+| LLM | Gemma 4 E2B/E4B（LiteRT-LM、2,048 tokens）またはAgents A1 4B Q4_K_M（llama.cpp、実機上限2,048 tokens） |
 | STT | sherpa-onnx Whisper Small multilingual、`language=ja`、4 CPU threads |
 | VAD | android-vad WebRTC 2.0.10、20 ms frames |
 | TTS | 自動取得したつくよみちゃん音声、または端末から取り込んだPiper Plus日本語モデル |
 
-LLMは`.litertlm`形式をLiteRT-LMで実行し、会話制御からは`LocalLanguageModel`として扱います。
+LLMは`.litertlm`形式をLiteRT-LM、Agents A1のGGUFをRunAnywhere llama.cppで実行し、会話制御からは`LocalLanguageModel`として扱います。
+Agents A1のツール呼び出しはモデルアダプター内で処理し、ツールタグや思考タグをUIと音声合成へ渡しません。
 現在のモデルURLはHugging Faceのrevisionへ固定し、ファイルサイズとSHA-256も固定しています。
 別モデルへ差し替える場合は、形式だけでなくチャットテンプレート、thinking設定、MTP能力をアダプター側で確認してください。
-既定のSTTは、RunAnywhere 0.20.6が呼び出し時の日本語指定をネイティブ認識器へ反映しないため、同梱されたsherpa-onnx 1.12.20を直接使います。
+既定のSTTは同梱されたsherpa-onnx 1.12.20を直接使います。
 VADはWebRTC方式のため、外部モデルをダウンロードしません。
 モデルごとのライセンスと再配布条件は、アプリ配布前に個別確認してください。
 
