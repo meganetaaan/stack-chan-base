@@ -144,6 +144,7 @@ class ConversationEngineTest {
         override val backend = LanguageModelBackend.CPU
 
         override suspend fun prepare(
+            modelSpec: jp.stackchan.localvoicepoc.model.LanguageModelSpec,
             modelFile: File,
             preference: LanguageModelBackendPreference,
         ): LanguageModelBackend = backend

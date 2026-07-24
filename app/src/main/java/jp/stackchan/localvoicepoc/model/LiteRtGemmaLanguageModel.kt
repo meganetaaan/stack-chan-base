@@ -58,6 +58,7 @@ class LiteRtGemmaLanguageModel(
         get() = activeEngine?.isInitialized() == true
 
     override suspend fun prepare(
+        modelSpec: LanguageModelSpec,
         modelFile: File,
         preference: LanguageModelBackendPreference,
     ): LanguageModelBackend =
@@ -82,7 +83,7 @@ class LiteRtGemmaLanguageModel(
 
                     ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
                     val gpuResult = runCatching {
-                        initializeEngine(modelFile, Backend.GPU())
+                        initializeEngine(modelFile, Backend.GPU(), modelSpec.maxContextTokens)
                     }
 
                     if (gpuResult.isSuccess) {
@@ -99,7 +100,7 @@ class LiteRtGemmaLanguageModel(
 
                 val cpuThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
                 val cpuResult = runCatching {
-                    initializeEngine(modelFile, Backend.CPU(threadCount = cpuThreads))
+                    initializeEngine(modelFile, Backend.CPU(threadCount = cpuThreads), modelSpec.maxContextTokens)
                 }
                 if (cpuResult.isSuccess) {
                     activeEngine = cpuResult.getOrThrow()
@@ -171,7 +172,11 @@ class LiteRtGemmaLanguageModel(
         ExperimentalFlags.enableSpeculativeDecoding = null
     }
 
-    private fun initializeEngine(modelFile: File, runtimeBackend: Backend): Engine {
+    private fun initializeEngine(
+        modelFile: File,
+        runtimeBackend: Backend,
+        maxContextTokens: Int,
+    ): Engine {
         val cacheDirectory = applicationContext.cacheDir.resolve("litertlm").apply {
             check(isDirectory || mkdirs()) { "LiteRT-LMキャッシュを作成できません: $absolutePath" }
         }
@@ -181,7 +186,7 @@ class LiteRtGemmaLanguageModel(
                 backend = runtimeBackend,
                 visionBackend = null,
                 audioBackend = null,
-                maxNumTokens = GemmaModelManifest.DEFAULT_MAX_CONTEXT_TOKENS,
+                maxNumTokens = maxContextTokens,
                 cacheDir = cacheDirectory.absolutePath,
             ),
         )

@@ -7,7 +7,7 @@ import org.junit.Test
 class GemmaModelManifestTest {
     @Test
     fun modelArtifactsArePinnedAndHaveIntegrityMetadata() {
-        assertEquals(listOf("E2B", "E4B"), GemmaModelManifest.all.map { it.variant })
+        assertEquals(listOf("E2B", "E4B", "A1 4B"), LanguageModelCatalog.all.map { it.variant })
         assertEquals(GemmaModelManifest.E2B, GemmaModelManifest.default)
         assertEquals(
             GemmaModelManifest.all.size,
@@ -16,7 +16,6 @@ class GemmaModelManifestTest {
         GemmaModelManifest.all.forEach { model ->
             assertTrue(model.downloadUrl.startsWith("https://"))
             assertTrue(model.downloadUrl.contains("/resolve/${model.revision}/"))
-            assertTrue(model.fileName.endsWith(".litertlm"))
             assertEquals(40, model.revision.length)
             assertEquals(64, model.sha256.length)
             assertTrue(model.sha256.all { it in '0'..'9' || it in 'a'..'f' })
@@ -25,6 +24,22 @@ class GemmaModelManifestTest {
         assertEquals("LiteRT-LM 0.14.0", GemmaModelManifest.RUNTIME)
         assertEquals("litertlm", GemmaModelManifest.FORMAT)
         assertEquals(2_048, GemmaModelManifest.DEFAULT_MAX_CONTEXT_TOKENS)
+    }
+
+    @Test
+    fun agentsA1MetadataMatchesPublishedAndroidArtifact() {
+        val model = LanguageModelCatalog.AGENTS_A1_4B
+        assertEquals("InternScience/Agents-A1-4B-Q4_K_M-GGUF", model.repository)
+        assertEquals("d92b02e27074b27542384f72bc0e72203c970f0f", model.revision)
+        assertEquals("Agents-A1-4B-Q4_K_M.gguf", model.fileName)
+        assertEquals(2_708_805_312L, model.expectedBytes)
+        assertEquals(
+            "d93c393a9bd5139a4b5cfe24d31ef553c5a497bfb8afec178a354ecbf508f062",
+            model.sha256,
+        )
+        assertEquals(LanguageModelRuntime.LLAMA_CPP, model.runtime)
+        assertEquals(2_048, model.maxContextTokens)
+        assertTrue(model.supportsTools)
     }
 
     @Test

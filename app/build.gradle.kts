@@ -1,14 +1,14 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 val piperAar = file("libs/piper-plus-release.aar")
 
 android {
     namespace = "jp.stackchan.localvoicepoc"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "jp.stackchan.localvoicepoc"
@@ -81,10 +81,14 @@ dependencies {
 
     implementation(libs.runanywhere.sdk)
     implementation(libs.runanywhere.onnx)
+    implementation(libs.runanywhere.llamacpp)
     implementation(libs.litert.lm)
     implementation(libs.webrtc.vad)
     implementation(libs.usb.serial)
     implementation(libs.compose.icons.lucide)
+    implementation(libs.mcp.kotlin.client)
+    implementation(libs.ktor.client.cio)
+    implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)

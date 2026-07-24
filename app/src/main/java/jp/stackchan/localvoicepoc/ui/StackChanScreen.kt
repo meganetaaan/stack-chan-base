@@ -24,6 +24,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -32,6 +33,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -68,6 +70,7 @@ import jp.stackchan.localvoicepoc.conversation.ConversationPhase
 import jp.stackchan.localvoicepoc.model.GemmaModelManifest
 import jp.stackchan.localvoicepoc.model.GemmaModelSpec
 import jp.stackchan.localvoicepoc.model.ModelComponent
+import jp.stackchan.localvoicepoc.mcp.McpProfile
 import jp.stackchan.localvoicepoc.piper.PiperAssetLinks
 import java.util.Locale
 
@@ -92,6 +95,9 @@ fun StackChanScreen(
     onStartPushToTalk: () -> Unit,
     onStopPushToTalk: () -> Unit,
     onRetryUsbConnection: () -> Unit,
+    onSaveMcpProfile: (McpProfile, String?) -> Unit = { _, _ -> },
+    onDeleteMcpProfile: (String) -> Unit = {},
+    onResolveMcpApproval: (Boolean) -> Unit = {},
     onFinishSetup: () -> Unit,
     onRetryStartup: () -> Unit,
     onDismissError: () -> Unit,
@@ -141,6 +147,8 @@ fun StackChanScreen(
                     onPrepareRecommendedPiper = onPrepareRecommendedPiper,
                     onLoadPiper = onLoadPiper,
                     onRetryUsbConnection = onRetryUsbConnection,
+                    onSaveMcpProfile = onSaveMcpProfile,
+                    onDeleteMcpProfile = onDeleteMcpProfile,
                     snackbarHostState = snackbarHostState,
                 )
             } else {
@@ -163,6 +171,21 @@ fun StackChanScreen(
         PiperTermsDialog(
             onConfirm = onConfirmRecommendedPiperTerms,
             onDismiss = onDismissRecommendedPiperTerms,
+        )
+    }
+    state.mcpApprovalRequest?.let { request ->
+        AlertDialog(
+            onDismissRequest = { onResolveMcpApproval(false) },
+            title = { Text("MCPツールを実行しますか？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("接続先: ${request.serverLabel}")
+                    Text("ツール: ${request.toolName}")
+                    Text(request.arguments.toString(), style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { Button(onClick = { onResolveMcpApproval(true) }) { Text("実行") } },
+            dismissButton = { TextButton(onClick = { onResolveMcpApproval(false) }) { Text("拒否") } },
         )
     }
 }
@@ -307,6 +330,15 @@ private fun ModelSetupStep(
             "${state.selectedGemmaModel.name}  ${formatModelSize(state.selectedGemmaModel.expectedBytes)}",
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            if (state.selectedGemmaModel.supportsTools) {
+                "端末ツール対応: 現在日時、バッテリー状態"
+            } else {
+                state.selectedGemmaModel.runtimeLabel
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         ModelProgressLine("会話モデル", state.modelProgress.getValue(ModelComponent.LLM))
         ModelProgressLine("音声認識", state.modelProgress.getValue(ModelComponent.STT))
@@ -530,9 +562,13 @@ private fun SettingsScreen(
     onPrepareRecommendedPiper: () -> Unit,
     onLoadPiper: () -> Unit,
     onRetryUsbConnection: () -> Unit,
+    onSaveMcpProfile: (McpProfile, String?) -> Unit,
+    onDeleteMcpProfile: (String) -> Unit,
     snackbarHostState: SnackbarHostState,
 ) {
     var showAdvancedVoice by rememberSaveable { mutableStateOf(false) }
+    var editingMcpProfile by remember { mutableStateOf<McpProfile?>(null) }
+    var showMcpEditor by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -556,6 +592,8 @@ private fun SettingsScreen(
             item {
                 SettingsSection("会話モデル") {
                     GemmaModelSelector(state.selectedGemmaModel, state.canStartModelMutation, onGemmaModelSelected)
+                    StatusRow("ランタイム", state.selectedGemmaModel.runtimeLabel)
+                    StatusRow("端末ツール", if (state.selectedGemmaModel.supportsTools) "日時・バッテリー" else "非対応")
                     ModelProgressLine(state.selectedGemmaModel.name, state.modelProgress.getValue(ModelComponent.LLM))
                     Button(
                         modifier = Modifier.fillMaxWidth(),
@@ -591,6 +629,42 @@ private fun SettingsScreen(
             }
             item { HorizontalDivider() }
             item {
+                SettingsSection("MCP接続") {
+                    if (state.mcpProfiles.isEmpty()) {
+                        Text("接続プロファイルはありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    state.mcpProfiles.forEach { profile ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(profile.displayName, fontWeight = FontWeight.SemiBold)
+                                Text(profile.connectorId, style = MaterialTheme.typography.labelSmall)
+                                Text(profile.serverUrl, style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(onClick = {
+                                        editingMcpProfile = profile
+                                        showMcpEditor = true
+                                    }) { Text("編集") }
+                                    TextButton(onClick = { onDeleteMcpProfile(profile.connectorId) }) {
+                                        Text("削除")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            editingMcpProfile = null
+                            showMcpEditor = true
+                        },
+                    ) { Text("MCPプロファイルを追加") }
+                }
+            }
+            item { HorizontalDivider() }
+            item {
                 SettingsSection("CoreS3 USB") {
                     ConnectionStatus(state)
                     OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = onRetryUsbConnection) {
@@ -603,6 +677,90 @@ private fun SettingsScreen(
             item { Spacer(Modifier.height(28.dp)) }
         }
     }
+    if (showMcpEditor) {
+        McpProfileDialog(
+            initial = editingMcpProfile,
+            onDismiss = { showMcpEditor = false },
+            onSave = { profile, token ->
+                onSaveMcpProfile(profile, token)
+                showMcpEditor = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun McpProfileDialog(
+    initial: McpProfile?,
+    onDismiss: () -> Unit,
+    onSave: (McpProfile, String?) -> Unit,
+) {
+    var connectorId by remember(initial) { mutableStateOf(initial?.connectorId.orEmpty()) }
+    var displayName by remember(initial) { mutableStateOf(initial?.displayName.orEmpty()) }
+    var serverUrl by remember(initial) { mutableStateOf(initial?.serverUrl.orEmpty()) }
+    var bearerToken by remember(initial) { mutableStateOf("") }
+    var allowCleartext by remember(initial) { mutableStateOf(initial?.allowCleartext ?: false) }
+    var forceApproval by remember(initial) { mutableStateOf(initial?.forceApproval ?: true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initial == null) "MCPプロファイルを追加" else "MCPプロファイルを編集") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = connectorId,
+                    onValueChange = { connectorId = it },
+                    label = { Text("connector_id") },
+                    singleLine = true,
+                    enabled = initial == null,
+                )
+                OutlinedTextField(
+                    value = displayName,
+                    onValueChange = { displayName = it },
+                    label = { Text("表示名") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = serverUrl,
+                    onValueChange = { serverUrl = it },
+                    label = { Text("Streamable HTTP URL") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = bearerToken,
+                    onValueChange = { bearerToken = it },
+                    label = { Text(if (initial?.hasBearerToken == true) "Bearer token（空欄なら維持）" else "Bearer token") },
+                    singleLine = true,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = allowCleartext, onCheckedChange = { allowCleartext = it })
+                    Text("HTTP平文通信を許可")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = forceApproval, onCheckedChange = { forceApproval = it })
+                    Text("実行時に常に確認")
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = connectorId.isNotBlank() && displayName.isNotBlank() && serverUrl.isNotBlank(),
+                onClick = {
+                    onSave(
+                        McpProfile(
+                            connectorId = connectorId,
+                            displayName = displayName,
+                            serverUrl = serverUrl,
+                            allowCleartext = allowCleartext,
+                            forceApproval = forceApproval,
+                            hasBearerToken = initial?.hasBearerToken ?: false,
+                        ),
+                        bearerToken.takeIf { it.isNotBlank() },
+                    )
+                },
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } },
+    )
 }
 
 @Composable
@@ -815,7 +973,12 @@ private fun GemmaModelSelector(
                 enabled = enabled,
                 shape = SegmentedButtonDefaults.itemShape(index, GemmaModelManifest.all.size),
             ) {
-                Text(if (model == GemmaModelManifest.E2B) "E2B 速度" else "E4B 品質", maxLines = 1)
+                val label = when (model) {
+                    GemmaModelManifest.E2B -> "E2B 速度"
+                    GemmaModelManifest.E4B -> "E4B 品質"
+                    else -> "A1 ツール"
+                }
+                Text(label, maxLines = 1)
             }
         }
     }
@@ -850,7 +1013,7 @@ private fun GemmaInformationLinks(model: GemmaModelSpec) {
     val uriHandler = LocalUriHandler.current
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
         TextButton(onClick = { uriHandler.openUri(model.modelCardUrl) }) { Text("モデル情報") }
-        TextButton(onClick = { uriHandler.openUri(GemmaModelManifest.LICENSE_URL) }) { Text("利用条件") }
+        TextButton(onClick = { uriHandler.openUri(model.licenseUrl) }) { Text("利用条件") }
     }
 }
 

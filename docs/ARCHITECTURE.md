@@ -15,25 +15,26 @@ ConversationEngine
  ├─ PcmAudioSource       ← SerialPcmAudioSource / CoreS3 microphone
  ├─ EndpointDetector     ← WebRTC VADと適応RMS
  ├─ LocalSpeechRecognizer← sherpa-onnx Whisper Small
- ├─ LocalLanguageModel   ← LiteRT-LM / Gemma 4 E2BまたはE4B
+ ├─ LocalLanguageModel   ← LiteRT-LM / Gemma 4、またはllama.cpp / Agents A1
  ├─ SpeechSynthesizer    ← PiperPlusReflectionSynthesizer
  └─ PcmAudioSink         ← SerialPcmAudioSink / CoreS3 AudioOut
 ```
 
 `ConversationEngine`は推論SDKをimportせず、`LocalLanguageModel`と`LocalSpeechRecognizer`だけを参照します。
 
-LLMは`LiteRtGemmaLanguageModel`が所有します。
-同アダプターは、選択されたGemma 4 E2BまたはE4BをGPUで初期化し、OpenCL経路の初期化またはウォームアップ生成に失敗した場合だけCPUへ退避します。
+`SelectableLanguageModel`は選択されたモデルに応じて`LiteRtGemmaLanguageModel`または`AgentsA1LanguageModel`へ処理を委譲します。
+GemmaアダプターはGPUで初期化し、OpenCL経路の初期化またはウォームアップ生成に失敗した場合だけCPUへ退避します。
+Agents A1アダプターはRunAnywhere 0.20.10のllama.cppバックエンドでQ4_K_M GGUFを実行します。
 会話セッションは履歴が一致する間再利用し、4ターンの履歴窓が移動した場合や生成を中断した場合に作り直します。
 
-E2BとE4Bは別々のアプリ内部ディレクトリへ保存します。
+E2B、E4B、Agents A1は別々のアプリ内部ディレクトリへ保存します。
 選択状態はSharedPreferencesへ保存し、モデル変更時はロード済みエンジンを閉じてから新しいモデルを準備します。
 
-RunAnywhereはWhisperファイルの取得と保存先管理だけに残しています。
-認識処理はsherpa-onnxを直接呼び出し、LLM生成、VAD、TTSには使用しません。
+RunAnywhereはWhisperファイルの取得と保存先管理、およびAgents A1のllama.cpp推論に使用します。
+認識処理はsherpa-onnxを直接呼び出します。
 
 モデル準備は`ModelSetupManager`が調整します。
-`GemmaModelStore`は、選択されたモデルをHugging Faceの固定revisionから途中再開で取得し、期待サイズとSHA-256を検証してからatomic renameします。
+`GemmaModelStore`は、選択されたLLMをHugging Faceの固定revisionから途中再開で取得し、期待サイズとSHA-256を検証してからatomic renameします。
 旧版のQwen3 4Bについては、新経路の準備成功後に、既知のモデルIDとファイル名に一致するアプリ内部ファイルだけを削除します。
 したがって、LLM-Hubなどの外部アプリは実行時依存に含まれません。
 
@@ -48,7 +49,8 @@ LISTENING/RECORDING
 ```
 
 音声認識はCoreS3からUSB CDCで受信する16kHz、16bit、mono PCMです。
-LLM出力はストリームで受信し、`SentenceChunker`が日本語の句点・疑問符・感嘆符で安定した文を切り出します。
+GemmaのLLM出力はストリームで受信し、`SentenceChunker`が日本語の句点・疑問符・感嘆符で安定した文を切り出します。
+Agents A1はツールタグの漏出を防ぐため、1回の生成結果をアダプター内で確定してから最終回答を渡します。
 各文をPiper Plusへ送り、全文生成の完了前に読み上げを開始します。
 Piperのsample rateはAndroid側で既定24kHzへ逐次変換します。
 変換後PCMは80ms単位にまとめて最大5秒のproducer queueへ入れ、USB送信だけをCoreS3のcreditで制御します。
@@ -62,6 +64,16 @@ Workerは1秒分のPCM queueへ500msをprebufferし、64KiBの共有ringを介�
 
 Gemmaのthinkingは、LiteRT-LMのテンプレートコンテキスト`enable_thinking=false`で無効にします。
 会話制御にはGemma固有のプロンプト記法を置きません。
+Agents A1ではthinkingを無効にし、Android組み込みツール、ｽﾀｯｸﾁｬﾝfunction、MCPツールを合計2回まで実行します。
+
+USB接続後、Androidは`session.created`を送信します。
+ｽﾀｯｸﾁｬﾝは`session.update`でinstructionsとtool定義を更新し、Androidは有効な全ツールを`session.updated`で返します。
+制御イベントはUSBのEVENTフレームでUTF-8 JSONとして送りますが、マイクとスピーカーのPCMは既存のバイナリフレームを維持します。
+
+`type: function`はｽﾀｯｸﾁｬﾝ側で実行します。
+`type: mcp`はAndroidが公式Kotlin SDKを使ってStreamable HTTPサーバーへ接続し、必要なら画面上で実行承認を求めます。
+MCPのBearer tokenはAndroid Keystoreで保護し、USBイベントへ送信しません。
+ツール呼び出しと結果はアダプター内で完結し、タグを除去した最終回答だけを`ConversationEngine`へ返します。
 
 ## Piper Plusの任意依存
 

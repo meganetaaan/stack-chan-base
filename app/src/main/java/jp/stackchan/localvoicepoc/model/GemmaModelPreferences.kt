@@ -10,8 +10,8 @@ class GemmaModelPreferences(context: Context) {
     )
 
     fun selected(): GemmaModelSpec =
-        GemmaModelManifest.find(preferences.getString(KEY_SELECTED_MODEL, null))
-            ?: GemmaModelManifest.default
+        LanguageModelCatalog.find(preferences.getString(KEY_SELECTED_MODEL, null))
+            ?: LanguageModelCatalog.default
 
     fun select(modelSpec: GemmaModelSpec) {
         preferences.edit { putString(KEY_SELECTED_MODEL, modelSpec.id) }

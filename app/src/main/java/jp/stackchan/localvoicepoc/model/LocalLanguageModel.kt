@@ -6,6 +6,7 @@ import java.io.File
 enum class LanguageModelBackend(val displayName: String) {
     GPU("GPU"),
     CPU("CPU"),
+    LLAMA_CPP("llama.cpp"),
 }
 
 enum class LanguageModelBackendPreference {
@@ -40,6 +41,7 @@ interface LocalLanguageModel : AutoCloseable {
     val backend: LanguageModelBackend?
 
     suspend fun prepare(
+        modelSpec: LanguageModelSpec,
         modelFile: File,
         preference: LanguageModelBackendPreference =
             LanguageModelBackendPreference.GPU_WITH_CPU_FALLBACK,

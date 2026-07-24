@@ -12,7 +12,7 @@ class LegacyModelCleaner(context: Context) {
     private val runAnywhereDirectory = context.filesDir.resolve("runanywhere")
 
     suspend fun removeObsoleteQwen(): Long = withContext(Dispatchers.IO) {
-        runCatching { CppBridgeModelRegistry.scanAndRestoreDownloadedModels() }
+        runCatching { CppBridgeModelRegistry.discoverDownloadedModels() }
             .onFailure { Log.w(TAG, "Could not scan the legacy model registry", it) }
 
         if (!runAnywhereDirectory.isDirectory) {
@@ -23,7 +23,7 @@ class LegacyModelCleaner(context: Context) {
         val rootPath = runAnywhereDirectory.canonicalFile.toPath()
         val registeredPath = runCatching { CppBridgeModelRegistry.get(LEGACY_MODEL_ID) }
             .getOrNull()
-            ?.localPath
+            ?.local_path
             .orEmpty()
             .takeIf { it.isNotBlank() }
             ?.let(::File)

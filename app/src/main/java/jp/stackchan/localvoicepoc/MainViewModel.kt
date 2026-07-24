@@ -12,7 +12,13 @@ import jp.stackchan.localvoicepoc.diagnostics.PlaybackTraceStore
 import jp.stackchan.localvoicepoc.diagnostics.RecognitionCaptureStore
 import jp.stackchan.localvoicepoc.model.GemmaModelManifest
 import jp.stackchan.localvoicepoc.model.GemmaModelPreferences
-import jp.stackchan.localvoicepoc.model.LiteRtGemmaLanguageModel
+import jp.stackchan.localvoicepoc.model.SelectableLanguageModel
+import jp.stackchan.localvoicepoc.model.DeviceToolRegistry
+import jp.stackchan.localvoicepoc.mcp.AndroidMcpToolProvider
+import jp.stackchan.localvoicepoc.mcp.McpApprovalRequest
+import jp.stackchan.localvoicepoc.mcp.McpProfile
+import jp.stackchan.localvoicepoc.mcp.McpProfileStore
+import jp.stackchan.localvoicepoc.realtime.RealtimeSessionController
 import jp.stackchan.localvoicepoc.model.ModelComponent
 import jp.stackchan.localvoicepoc.model.ModelSetupManager
 import jp.stackchan.localvoicepoc.piper.PiperAssetStore
@@ -34,6 +40,7 @@ import jp.stackchan.localvoicepoc.ui.UsbConnectionStatus
 import jp.stackchan.localvoicepoc.ui.StartupAssetDecision
 import jp.stackchan.localvoicepoc.ui.decideStartupAssets
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,12 +64,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     private val gemmaPreferences = GemmaModelPreferences(application)
     private val appPreferences = AppPreferences(application)
+    private val mcpProfileStore = McpProfileStore(application)
+    private val toolRegistry = DeviceToolRegistry(application)
+    private var pendingMcpApproval: CompletableDeferred<Boolean>? = null
+    private lateinit var realtimeSession: RealtimeSessionController
     private val speechRecognizer = SherpaWhisperRecognizer()
-    private val languageModel = LiteRtGemmaLanguageModel(application)
+    private val languageModel = SelectableLanguageModel(application, toolRegistry) {
+        if (::realtimeSession.isInitialized) realtimeSession.instructions else ""
+    }
     private val modelManager = ModelSetupManager(application, speechRecognizer, languageModel)
     private val piperStore = PiperAssetStore(application)
     private val synthesizer = PiperPlusReflectionSynthesizer(application)
     private val usbConnection = StackChanUsbConnection(application)
+    private val mcpTools = AndroidMcpToolProvider(mcpProfileStore) { request -> awaitMcpApproval(request) }
     private val serialAudioSource = SerialPcmAudioSource(usbConnection)
     private val serialAudioSink = SerialPcmAudioSink(
         connection = usbConnection,
@@ -81,6 +95,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         MainUiState(
             selectedGemmaModel = gemmaPreferences.selected(),
             piperAarPresent = synthesizer.runtimeAvailable,
+            mcpProfiles = mcpProfileStore.profiles(),
         ),
     )
     val state: StateFlow<MainUiState> = mutableState.asStateFlow()
@@ -89,6 +104,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var startupAttempted = false
 
     init {
+        realtimeSession = RealtimeSessionController(
+            transport = usbConnection,
+            registry = toolRegistry,
+            mcp = mcpTools,
+            scope = viewModelScope,
+        ).also { it.start() }
         Log.i(TAG, "Voice diagnostics directory: ${voiceDiagnosticsDirectory.absolutePath}")
         refreshPiperFiles()
         viewModelScope.launch {
@@ -310,6 +331,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun retryUsbConnection() {
         usbConnection.retry()
+    }
+
+    fun saveMcpProfile(profile: McpProfile, bearerToken: String?) {
+        runCatching { mcpProfileStore.save(profile, bearerToken) }
+            .onSuccess { mutableState.update { it.copy(mcpProfiles = mcpProfileStore.profiles()) } }
+            .onFailure(::showError)
+    }
+
+    fun deleteMcpProfile(connectorId: String) {
+        mcpProfileStore.delete(connectorId)
+        mutableState.update { it.copy(mcpProfiles = mcpProfileStore.profiles()) }
+    }
+
+    fun resolveMcpApproval(approved: Boolean) {
+        pendingMcpApproval?.complete(approved)
+        pendingMcpApproval = null
+        mutableState.update { it.copy(mcpApprovalRequest = null) }
+    }
+
+    private suspend fun awaitMcpApproval(request: McpApprovalRequest): Boolean {
+        pendingMcpApproval?.complete(false)
+        val response = CompletableDeferred<Boolean>()
+        pendingMcpApproval = response
+        mutableState.update { it.copy(mcpApprovalRequest = request) }
+        return try {
+            kotlinx.coroutines.withTimeout(60_000L) { response.await() }
+        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            false
+        } finally {
+            if (pendingMcpApproval === response) pendingMcpApproval = null
+            mutableState.update { it.copy(mcpApprovalRequest = null) }
+        }
     }
 
     fun finishSetup() {
@@ -586,6 +639,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        pendingMcpApproval?.complete(false)
+        realtimeSession.close()
         engine.close()
         serialAudioSource.close()
         serialAudioSink.close()
