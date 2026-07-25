@@ -64,6 +64,10 @@ Firmwareはpeerがbit 10を広告した場合だけ`EVENT`を送信する。
 このnegotiationにより、`EVENT`を解釈しない既存Android hostへFirmwareから未知のframe typeが送られることを防ぐ。
 
 録音は`MIC_START`、`MIC_STARTED`、`MICROPHONE_PCM`、`MIC_STOP`、`MIC_STOPPED`の順で制御する。
+USBホストは`MIC_STOPPED`を受信するまで、同じstream ID、sample rate、空payloadの`MIC_STOP`を500ミリ秒間隔で再送できる。
+Firmwareは最初の`MIC_STOP`で録音を停止し、同じ要求の再送には録音状態を変更せず`MIC_STOPPED`を再送する。
+停止済みstreamと異なる古い`MIC_STOP`は、現在の録音sessionへ適用しない。
+この再送履歴は次の有効な`HELLO`で破棄する。
 再生は`SPEAKER_START`、`SPEAKER_CREDIT`、`SPEAKER_PCM`、`SPEAKER_END`、`SPEAKER_DONE`の順で制御する。
 Firmwareがcapability bit 6を返した場合、USBホストは各文のPCM直前に`SPEAKER_TEXT=37`を送る。
 `SPEAKER_TEXT` payloadは最大1,024 bytesのUTF-8で、sample rateは再生中の値と一致させる。

@@ -46,6 +46,7 @@ const MAX_MICROPHONE_QUEUE_FRAMES = 50
 const SPEAKER_FRAME_BYTES_24KHZ = 3_840
 const MAX_UNUSED_SPEAKER_CREDIT = 8 * 1024
 const CONTROL_TIMEOUT_MS = 5_000
+const CONTROL_RETRY_MS = 500
 const HELLO_TIMEOUT_MS = 8_000
 const HELLO_RETRY_MS = 500
 const USB_OPEN_SETTLE_MS = 3_000
@@ -263,8 +264,29 @@ export class UsbStackChanDevice implements StackChanDevice {
     }
     try {
       const stopped = this.#waitForControl(StackChanControl.MIC_STOPPED, session.streamId)
-      await this.#sendControl(StackChanControl.MIC_STOP, MICROPHONE_SAMPLE_RATE, undefined, session.streamId)
-      await stopped
+      const sendFailure = new Deferred<never>()
+      let sending = false
+      const sendStop = () => {
+        if (sending || !this.#connected) return
+        sending = true
+        void this.#sendControl(
+          StackChanControl.MIC_STOP,
+          MICROPHONE_SAMPLE_RATE,
+          undefined,
+          session.streamId,
+        )
+          .catch((error) => sendFailure.reject(error))
+          .finally(() => {
+            sending = false
+          })
+      }
+      sendStop()
+      const retryTimer = setInterval(sendStop, CONTROL_RETRY_MS)
+      try {
+        await Promise.race([stopped, sendFailure.promise])
+      } finally {
+        clearInterval(retryTimer)
+      }
     } finally {
       session.queue.close()
       if (this.#microphone === session) this.#microphone = undefined

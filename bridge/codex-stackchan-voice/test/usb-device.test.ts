@@ -20,6 +20,7 @@ class BootingSerialPort extends EventEmitter {
   microphoneStopCount = 0
   speakerEndCount = 0
   speakerAbortCount = 0
+  microphoneStopAcknowledgementsToDrop = 0
   destroyed = false
   flushed = false
   controlLines: { dtr: boolean; rts: boolean } | undefined
@@ -88,6 +89,12 @@ class BootingSerialPort extends EventEmitter {
       if (frame.flags === StackChanControl.MIC_STOP) {
         this.microphoneStopCount += 1
         if (!this.#acknowledgeMicrophoneStop) continue
+        if (
+          this.microphoneStopCount <=
+          this.microphoneStopAcknowledgementsToDrop
+        ) {
+          continue
+        }
         const stopped = encodeStackChanFrame({
           type: StackChanFrameType.CONTROL,
           flags: StackChanControl.MIC_STOPPED,
@@ -232,4 +239,26 @@ test('USB abort and close share the pending MIC_STOP task', async () => {
   assert.equal(port.isOpen, false)
   assert.equal(port.flushed, true)
   assert.equal(port.destroyed, true)
+})
+
+test('USB microphone stop retries the same stream when its first acknowledgement is lost', async () => {
+  const port = new BootingSerialPort(true, true)
+  port.microphoneStopAcknowledgementsToDrop = 1
+  const device = new UsbStackChanDevice({
+    portPath: '/dev/fake-stackchan',
+    portFactory: () => port,
+    openSettleMilliseconds: 0,
+    controlTimeoutMilliseconds: 1_500,
+  })
+  await device.connect(new AbortController().signal)
+  const microphone = device
+    .microphone(new AbortController().signal)
+    [Symbol.asyncIterator]()
+  const first = await microphone.next()
+
+  assert.equal(first.done, false)
+  await microphone.return?.()
+
+  assert.equal(port.microphoneStopCount, 2)
+  await device.close()
 })

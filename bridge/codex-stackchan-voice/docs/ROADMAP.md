@@ -2,7 +2,7 @@
 
 更新日: 2026-07-25
 
-状態: 会話の常駐運用を実装済み、表情ツールは未実装
+状態: 会話の常駐運用とMIC停止再送を実装済み、30分安定性評価と表情ツールは未実施
 
 ## 実装した利用方法
 
@@ -87,6 +87,13 @@ CoreS3向けrelease firmwareの実ビルドでも、TypeScript、Piu resource、
 systemd user serviceはUSB serial numberへ固定して導入し、USB、app-server、Codex threadへ接続した状態で`active`を維持している。
 初回の実機導入では`WorkingDirectory`を引用符で囲んだunitがsystemdに拒否され、インストーラが成功表示する反例を検出した。
 `WorkingDirectory`専用escapeと起動後の`is-active`検査を追加し、実unitの起動とparser testで回帰を防いだ。
+
+常駐動作中、再生後の`MIC_STOPPED`が一度欠落すると5秒でtimeoutし、Realtimeを再接続する反例を検出した。
+hostは同一streamの`MIC_STOP`を500ミリ秒ごとに再送し、Firmwareは直前に停止したstreamをHELLOまで記憶して`MIC_STOPPED`を冪等に再送するよう修正した。
+旧streamの遅延停止が新しいマイクを止めないことは、stream IDの有限全列挙でも検査した。
+
+修正後の実機では、同じsystemdプロセスで約79秒間に6回の応答を連続再生した。
+各応答前後のマイク停止と再開を通過し、`MIC_STOPPED` timeout、Realtime再接続、systemd再起動はいずれも発生しなかった。
 
 30分のsoak test、USB物理抜線後の再接続、app-server実プロセス再起動は未実施である。
 
