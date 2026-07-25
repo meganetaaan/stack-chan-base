@@ -1,19 +1,19 @@
 # CoreS3 USB CDC音声通信
 
-Android端末をUSBホスト、M5Stack CoreS3をUSB Serial/JTAGデバイスとして接続する。
-Android側は`usb-serial-for-android`でVID `0x303A`、PID `0x1001`のCDCポートを開く。
+Android端末またはPC上のCodex音声ブリッジをUSBホスト、M5Stack CoreS3をUSB Serial/JTAGデバイスとして接続する。
+Android側は`usb-serial-for-android`、Codex音声ブリッジはNode.jsの`serialport`でVID `0x303A`、PID `0x1001`のCDCポートを開く。
 通信速度の設定値は115,200 baudだが、実際の転送はUSB CDCで行われる。
 
 ## 音声形式
 
 マイクは16 kHz、16 bit little-endian、monoで固定する。
-Firmwareは20 ms、640 bytes単位の`MICROPHONE_PCM`をAndroidへ送る。
-Androidはsequenceの欠損を最大10フレームまで無音で補完し、それを超える欠損を通信エラーとする。
+Firmwareは20 ms、640 bytes単位の`MICROPHONE_PCM`をUSBホストへ送る。
+USBホストはsequenceの欠損を最大10フレームまで無音で補完し、それを超える欠損を通信エラーとする。
 
 スピーカーは8 kHz、16 kHz、24 kHzの16 bit little-endian、monoを受け付ける。
-Androidの既定出力は24 kHzであり、Piperが返すsample rateから線形補間で逐次変換する。
+USBホストの既定出力は24 kHzであり、入力音声のsample rateから線形補間で逐次変換する。
 CoreS3の`AudioOut`にはUSBフレームと同じsample rateを指定する。
-AndroidはスピーカーPCMを80 ms単位で送る。
+USBホストはスピーカーPCMを80 ms単位で送る。
 payloadは8 kHzで1,280 bytes、16 kHzで2,560 bytes、24 kHzで3,840 bytesとなり、最大payload長に収まる。
 
 会話は半二重で動作する。
@@ -49,29 +49,69 @@ AndroidとFirmwareはcapability bit 9の`STREAM_ID`を必須として確認し�
 typeは`CONTROL=0`、`MICROPHONE_PCM=1`、`SPEAKER_PCM=2`を使用する。
 診断Firmwareは`DIAGNOSTICS=5`でAudioOutの統計を返す。
 既存の`EXPRESSION=3`と`MOTION=4`は今回の音声経路では使用しない。
+汎用application eventは`EVENT=6`を使用する。
 
 ## 制御手順
 
-接続直後、Androidは`HELLO`を送る。
+接続直後、USBホストは`HELLO`を送る。
 HELLO payloadは最大payload長とcapability bitsetを並べた二つの`uint32`である。
 Firmwareは同じ形式の`HELLO_ACK`を返す。
-Androidはマイク、スピーカー、credit、24 kHz出力のcapabilityを確認して`READY`へ遷移する。
-Androidはさらにcapability bit 9のstream ID対応を必須として確認する。
+USBホストはマイク、スピーカー、credit、24 kHz出力のcapabilityを確認して`READY`へ遷移する。
+USBホストはさらにcapability bit 9のstream ID対応を必須として確認する。
+
+Codex音声ブリッジは、上記に加えてcapability bit 10の`EVENT`対応を必須として確認する。
+Firmwareはpeerがbit 10を広告した場合だけ`EVENT`を送信する。
+このnegotiationにより、`EVENT`を解釈しない既存Android hostへFirmwareから未知のframe typeが送られることを防ぐ。
 
 録音は`MIC_START`、`MIC_STARTED`、`MICROPHONE_PCM`、`MIC_STOP`、`MIC_STOPPED`の順で制御する。
 再生は`SPEAKER_START`、`SPEAKER_CREDIT`、`SPEAKER_PCM`、`SPEAKER_END`、`SPEAKER_DONE`の順で制御する。
-Firmwareがcapability bit 6を返した場合、Androidは各文のPCM直前に`SPEAKER_TEXT=37`を送る。
+Firmwareがcapability bit 6を返した場合、USBホストは各文のPCM直前に`SPEAKER_TEXT=37`を送る。
 `SPEAKER_TEXT` payloadは最大1,024 bytesのUTF-8で、sample rateは再生中の値と一致させる。
-このcapabilityは任意であり、未対応Firmwareに対してAndroidは字幕を送らない。
+このcapabilityは任意であり、未対応Firmwareに対してUSBホストは字幕を送らない。
 中断時は`SPEAKER_ABORT`を送る。
-Firmwareがcapability bit 8を返した場合、Androidは`STATUS=48`で会話状態を送る。
+Firmwareがcapability bit 8を返した場合、USBホストは`STATUS=48`で会話状態を送る。
 payloadは1 byteで、`IDLE=0`、`RECOGNIZING=1`、`SPEAKING=2`とする。
+
+## Application event
+
+`EVENT=6`は音声transportから独立した双方向application eventを運ぶ。
+payloadはUTF-8 JSONとし、一つのeventは最大64 KiBとする。
+一つのUSB frameに収まらないeventは、HELLOで合意した最大payload長以下に分割する。
+
+- `flags` bit 0の`START`はeventの先頭frameを表す。
+- `flags` bit 1の`END`はeventの末尾frameを表す。
+- 一つのeventは0以外の同じ`streamId`をmessage IDとして使う。
+- `sequence`はeventごとに0から開始し、frameごとに1増加する。
+- 単一frameのeventは`START | END`を設定する。
+- sequence欠落、不正なUTF-8、64 KiB超過はevent全体を破棄する。音声sessionには適用しない。
+
+Stack-chan共通eventはトップレベルに`schema: "stackchan.event.v1"`、`type`、opaqueな`requestId`を持つ。
+Codex app-server固有のJSON-RPC payloadをそのままFirmwareへ転送してはならない。
+Codex音声ブリッジは、コマンド実行とファイル変更を次の共通eventへ正規化する。
+
+| direction | type | purpose |
+| --- | --- | --- |
+| host → Firmware | `approval.request` | 種別、タイトル、要約、詳細を表示する |
+| Firmware → host | `approval.presented` | 同じ`requestId`の画面表示完了を通知する |
+| Firmware → host | `approval.response` | `decision`を`approve`または`decline`で返す |
+| host → Firmware | `approval.resolved` | 自端末または別clientで処理済みの画面を閉じる |
+| host → Firmware | `approval.suspended` | app-server再接続中として操作を一時停止する |
+
+`approval.request`の詳細本文は16 KiBまでとし、切り詰めた場合は`truncated=true`を設定する。
+hostは`approval.presented`を受け取るまで同じ`requestId`のrequestを再送でき、Firmwareは冪等に扱う。
+Firmwareはresponse送信後も画面を「送信中」として保持し、`approval.resolved`まで同じdecisionを再送できる。
+hostは重複responseへ二重にJSON-RPC応答してはならない。
+
+承認自体に時間制限は設けない。
+USB切断時は未解決のCodex server requestを拒否せず保持し、再接続後に画面を復元する。
+別のCodex clientで処理された場合は、app-serverの`serverRequest/resolved`を`approval.resolved`へ変換する。
+ブリッジを明示的に終了する場合だけ、未解決要求を`decline`してから接続を閉じる。
 
 Firmwareのスピーカーqueueは1秒分である。
 `SPEAKER_CREDIT` payloadは新たに送信可能になったbytes数を表す増分値である。
 未消費creditの上限は8 KiBとし、一回の送信量がFirmwareのnative USB受信ringに収まるよう制限する。
-Androidはcreditを消費してからPCMを送り、FirmwareはPCM queueに空きが生じた分だけcreditを返す。
-Androidは最大5秒分のPCMを送信待ちqueueへ保持し、Piper合成をcredit待ちから分離する。
+USBホストはcreditを消費してからPCMを送り、FirmwareはPCM queueに空きが生じた分だけcreditを返す。
+USBホストは最大5秒分のPCMを送信待ちqueueへ保持し、音声生成をcredit待ちから分離する。
 一つのPCM frameに必要なcreditが15秒更新されない場合は、その再生をエラーとして中断する。
 Firmwareは500 ms分をprebufferしてから再生を開始する。
 短い発話は`SPEAKER_END`を受信した時点で、500 ms未満でも再生を開始する。
@@ -87,7 +127,7 @@ Firmwareは対応するPCMを`AudioOut`へ書き込む直前に字幕を最大2�
 
 `ERROR` payloadは4 bytesのcodeである。
 code 6はスピーカーPCMのsequence欠落、code 7はPCM受信buffer超過、code 8は字幕queue超過を表す。
-Androidはcodeと対象stream IDを再生traceおよび画面のエラーへ残す。
+USBホストはcodeと対象stream IDを再生traceおよび画面のエラーへ残す。
 
 再生traceのschema version 2は、各`UsbSerialPort.write`について、要求byte数、完了byte数、queue投入時刻、実write開始時刻、完了時刻、frame種別、control、stream ID、sequence、sample rate、payload byte数を記録する。
 時刻は再生trace開始からのmicrosecond単位の相対値である。
