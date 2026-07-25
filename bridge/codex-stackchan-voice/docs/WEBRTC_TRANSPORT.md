@@ -34,6 +34,13 @@ Codex app-serverはsideband WebSocketを所有し、このブリッジはWebRTC 
 CoreS3のマイク入力がない時間とCoreS3が応答を再生している時間には、無音フレームを送ります。
 これは双方向のaudio trackを連続させるための処理ですが、ICE consentの代替ではありません。
 
+## 応答音声の経路
+
+WebRTCマイクから発話した実機試験では、ユーザー文字起こしとassistant transcriptはsidebandへ通知されましたが、`thread/realtime/outputAudio/delta`は通知されませんでした。
+同じ応答のOpus/RTPはremote audio trackへ届いていたため、ブリッジはremote RTPを48kHz mono PCMへデコードし、24kHzへ変換してCoreS3へ送ります。
+sideband PCMを再生元にした旧実装はassistant transcriptまで進んでも無音になったため、再生経路から削除しました。
+remote RTPとsideband上のassistant transcript完了にはtransportをまたぐ順序保証がないため、遅延RTPを新しい応答として再生したりセッションエラーへ変換したりしません。
+
 ## ネイティブ実装の評価
 
 `@roamhq/wrtc`を使ったlibwebrtc試験は90秒の接続を維持しました。

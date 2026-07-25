@@ -2,7 +2,7 @@
 
 CoreS3のUSBマイク、スピーカー、状態表示、承認UIを、ローカルで動作中のCodex app-server daemonへ接続するTypeScript製CLIです。
 
-Codex SDKは使用しません。daemonのUnix socketへ標準WebSocketで接続し、app-server JSON-RPCのexperimentalな`thread/realtime/*` APIとapproval server requestを扱います。Realtime v3へのマイク入力とセッション確立にはWebRTCを使い、スピーカー出力にはapp-serverが順序付きで通知するPCMを使います。
+Codex SDKは使用しません。daemonのUnix socketへ標準WebSocketで接続し、app-server JSON-RPCのexperimentalな`thread/realtime/*` APIとapproval server requestを扱います。Realtime v3のセッション確立、マイク入力、スピーカー出力にはWebRTCを使います。
 
 ## 必要なもの
 
@@ -115,10 +115,12 @@ ICEテストは、単発のSTUN応答欠落後も監視を続けること、4秒
 
 - CoreS3入力: PCM16LE mono、16kHz、20ms
 - WebRTC入力: PCM16LE monoを48kHzへ逐次変換し、実音声または無音を20ms単位で連続してOpus/RTP化
-- app-server出力: `thread/realtime/outputAudio/delta`の順序付きPCM16LE mono
+- WebRTC出力: remote Opus/RTPを48kHz mono PCMへデコード
 - 出力prebuffer: 240ms
 - CoreS3出力: PCM16LE mono、24kHz、80ms frame、speaker credit制御
 
-WebRTCのremote Opus/RTPとapp-serverのPCM通知には同じ応答音声が含まれますが、ブリッジはRTPを再生には使いません。RTPとsideband上の終了通知にはtransportをまたぐ順序保証がなく、遅延したRTPを再生終了後の新しい音声と誤認するためです。app-serverのPCM通知と`thread/realtime/transcript/done`は同じ順序付き通知経路にあるため、こちらを再生契約とします。
+実機検証では、WebRTCマイク入力から生成された応答に`thread/realtime/outputAudio/delta`が通知されず、応答音声はremote RTPだけに届きました。
+ブリッジはremote RTPを再生の正本とし、app-serverの`thread/realtime/transcript/done`を終端の補助信号として使います。
+終端通知より遅れて届いたRTPは新しい応答として再生せず、現在の再生を切断するエラーにも変換しません。
 
 USB wire contractはリポジトリ直下の`docs/SERIAL_NEXT_STEP.md`を参照してください。

@@ -86,7 +86,7 @@ for (const testCase of [
     expected: /incomplete PCM16 sample/,
   },
 ] as const) {
-  test(`audio bridge rejects ${testCase.name} without throwing from the app-server emitter`, async () => {
+  test(`audio bridge rejects ${testCase.name} without throwing from the WebRTC emitter`, async () => {
     const appServer = new FakeAppServer()
     const device = new FakeDevice()
     const session = new FakeRealtimeSession()
@@ -100,13 +100,13 @@ for (const testCase of [
 
     const running = bridge.run(new AbortController().signal)
     assert.doesNotThrow(() => {
-      emitOutputAudio(appServer, testCase.audio)
+      session.emit('audio', testCase.audio)
     })
     await assert.rejects(running, testCase.expected)
   })
 }
 
-test('audio bridge prebuffers app-server output and drains received audio after a terminal error', async () => {
+test('audio bridge prebuffers WebRTC output and drains received audio after a terminal error', async () => {
   const appServer = new FakeAppServer()
   const device = new RecordingDevice()
   const session = new FakeRealtimeSession()
@@ -118,13 +118,13 @@ test('audio bridge prebuffers app-server output and drains received audio after 
     () => session,
   )
   const running = bridge.run(new AbortController().signal)
-  const frame = pcmChunk(encodePcm16Le(new Int16Array(480).fill(1_000)), 24_000)
+  const frame = pcmChunk(encodePcm16Le(new Int16Array(960).fill(1_000)), 48_000)
 
-  for (let index = 0; index < 11; index += 1) emitOutputAudio(appServer, frame)
+  for (let index = 0; index < 11; index += 1) session.emit('audio', frame)
   await new Promise<void>((resolve) => setImmediate(resolve))
   assert.equal(device.playbackStarted, false)
 
-  emitOutputAudio(appServer, frame)
+  session.emit('audio', frame)
   await waitUntil(() => device.playbackStarted)
   appServer.emit('notification', {
     method: 'thread/realtime/error',
@@ -138,7 +138,7 @@ test('audio bridge prebuffers app-server output and drains received audio after 
   assert.equal(device.playbackChunks.length, 12)
 })
 
-test('audio bridge ignores idle app-server frames containing only silence', async () => {
+test('audio bridge ignores idle WebRTC frames containing only silence', async () => {
   const appServer = new FakeAppServer()
   const device = new RecordingDevice()
   const session = new FakeRealtimeSession()
@@ -151,9 +151,9 @@ test('audio bridge ignores idle app-server frames containing only silence', asyn
   )
   const controller = new AbortController()
   const running = bridge.run(controller.signal)
-  const silence = pcmChunk(new Uint8Array(480 * 2), 24_000)
+  const silence = pcmChunk(new Uint8Array(960 * 2), 48_000)
 
-  for (let index = 0; index < 20; index += 1) emitOutputAudio(appServer, silence)
+  for (let index = 0; index < 20; index += 1) session.emit('audio', silence)
   await new Promise<void>((resolve) => setImmediate(resolve))
   assert.equal(device.playbackStarted, false)
 
@@ -186,31 +186,4 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
     if (Date.now() >= deadline) throw new Error('condition timed out')
     await new Promise<void>((resolve) => setTimeout(resolve, 5))
   }
-}
-
-function emitOutputAudio(
-  appServer: FakeAppServer,
-  audio: {
-    data: Uint8Array
-    sampleRate: number
-    channels: number
-    format: string
-  },
-): void {
-  appServer.emit('notification', {
-    method: 'thread/realtime/outputAudio/delta',
-    params: {
-      threadId: appServer.threadId,
-      audio: {
-        data: Buffer.from(audio.data).toString('base64'),
-        sampleRate: audio.sampleRate,
-        numChannels: audio.channels,
-        samplesPerChannel:
-          audio.data.byteLength % (2 * audio.channels) === 0
-            ? audio.data.byteLength / (2 * audio.channels)
-            : null,
-        itemId: null,
-      },
-    },
-  })
 }

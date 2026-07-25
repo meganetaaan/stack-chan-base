@@ -1,4 +1,13 @@
+import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { decodePcm16Le, encodePcm16Le } from '../src/audio/pcm.js'
+
+const require = createRequire(import.meta.url)
+const { OpusEncoder } = require('@discordjs/opus') as {
+  OpusEncoder: new (sampleRate: number, channels: number) => {
+    encode(buffer: Buffer): Buffer
+  }
+}
 
 const mockWebRtc = vi.hoisted(() => ({
   peer: undefined as
@@ -6,6 +15,11 @@ const mockWebRtc = vi.hoisted(() => ({
         connectionState: 'connected' | 'disconnected' | 'failed' | 'closed'
         dataChannel: { setState(state: 'open' | 'closed'): void }
         setConnectionState(state: 'connected' | 'disconnected' | 'failed' | 'closed'): void
+      }
+    | undefined,
+  remoteTrack: undefined as
+    | {
+        emitRtp(payload: Buffer): void
       }
     | undefined,
 }))
@@ -42,6 +56,7 @@ vi.mock('werift', () => {
 
   class FakeMediaStreamTrack {
     readonly kind: string
+    readonly onReceiveRtp = new Signal<[{ payload: Buffer }]>()
     codec: { mimeType: string } | undefined
 
     constructor(options: { kind: string }) {
@@ -51,6 +66,10 @@ vi.mock('werift', () => {
     writeRtp(): void {}
 
     stop(): void {}
+
+    emitRtp(payload: Buffer): void {
+      this.onReceiveRtp.emit({ payload })
+    }
   }
 
   class FakePeerConnection {
@@ -85,6 +104,7 @@ vi.mock('werift', () => {
       this.dataChannel.onMessage.emit(JSON.stringify({ type: 'session.started' }))
       const remoteTrack = new FakeMediaStreamTrack({ kind: 'audio' })
       remoteTrack.codec = { mimeType: 'audio/opus' }
+      mockWebRtc.remoteTrack = remoteTrack
       this.onTrack.emit(remoteTrack)
     }
 
@@ -131,6 +151,33 @@ describe('RealtimeWebRtcSession transport liveness', () => {
   afterEach(async () => {
     await Promise.all(sessions.splice(0).map((session) => session.close()))
     mockWebRtc.peer = undefined
+    mockWebRtc.remoteTrack = undefined
+  })
+
+  it('decodes remote Opus RTP and emits PCM audio', async () => {
+    const appServer = {
+      startRealtime: vi.fn(async () => 'v=0\r\n'),
+      stopRealtime: vi.fn(async () => undefined),
+    } as unknown as CodexAppServer
+    const session = new RealtimeWebRtcSession(appServer)
+    sessions.push(session)
+    const received = new Promise<import('../src/types.js').PcmChunk>((resolve) => {
+      session.on('audio', resolve)
+    })
+    await session.start()
+    const encoder = new OpusEncoder(48_000, 1)
+    const samples = Int16Array.from({ length: 960 }, (_, index) =>
+      Math.round(Math.sin(index / 8) * 4_000),
+    )
+
+    mockWebRtc.remoteTrack!.emitRtp(
+      encoder.encode(Buffer.from(encodePcm16Le(samples))),
+    )
+
+    const chunk = await received
+    expect(chunk.sampleRate).toBe(48_000)
+    expect(chunk.channels).toBe(1)
+    expect(Math.max(...decodePcm16Le(chunk.data).map(Math.abs))).toBeGreaterThan(100)
   })
 
   it('does not end an established media session on data-channel close alone', async () => {

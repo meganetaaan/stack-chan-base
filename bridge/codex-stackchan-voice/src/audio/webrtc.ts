@@ -64,6 +64,7 @@ const defaultAudioSenderScheduler: OpusRtpAudioSenderScheduler = {
 
 type RealtimeWebRtcSessionEvents = {
   event: [event: Record<string, unknown>]
+  audio: [chunk: PcmChunk]
   close: [error?: Error]
 }
 
@@ -74,7 +75,9 @@ export interface RealtimeAudioSession {
   resetMicrophoneAudio(): void
   close(): Promise<void>
   on(event: 'event', listener: (event: Record<string, unknown>) => void): this
+  on(event: 'audio', listener: (chunk: PcmChunk) => void): this
   off(event: 'event', listener: (event: Record<string, unknown>) => void): this
+  off(event: 'audio', listener: (chunk: PcmChunk) => void): this
 }
 
 export type RealtimeWebRtcSessionOptions = {
@@ -436,6 +439,16 @@ export class RealtimeWebRtcSession
       this.#fail(new Error(`WebRTC negotiated unsupported remote codec: ${track.codec?.mimeType}`))
       return
     }
+    const decoder = new OpusRtpAudioDecoder()
+    this.#subscribe(track.onReceiveRtp, (packet) => {
+      try {
+        this.emit('audio', decoder.decode(packet))
+      } catch (error) {
+        this.#fail(new Error('WebRTC remote Opus audio could not be decoded', {
+          cause: error,
+        }))
+      }
+    })
     this.#remoteAudioAttached = true
     this.#remoteAudioTrack.resolve()
   }

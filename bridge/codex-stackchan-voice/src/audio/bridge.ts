@@ -8,7 +8,6 @@ import {
   RealtimeWebRtcSession,
   type RealtimeAudioSession,
 } from './webrtc.js'
-import { parseAppServerOutputAudio } from './app-server-output.js'
 
 const REALTIME_SAMPLE_RATE = 24_000
 const ASSISTANT_AUDIO_GRACE_MS = 500
@@ -83,7 +82,9 @@ export class RealtimeAudioBridge {
     const session = this.#sessionFactory(this.#appServer, this.#voice)
     this.#session = session
     const onNotification = (notification: RpcNotification) => this.#handleNotification(notification)
+    const onSessionAudio = (chunk: PcmChunk) => this.#handleOutputAudio(chunk)
     this.#appServer.on('notification', onNotification)
+    session.on('audio', onSessionAudio)
     const abortDeferred = new Deferred<never>()
     const onAbort = () => abortDeferred.reject(signal.reason ?? abortError())
     if (signal.aborted) onAbort()
@@ -113,6 +114,7 @@ export class RealtimeAudioBridge {
     } finally {
       this.#running = false
       this.#appServer.off('notification', onNotification)
+      session.off('audio', onSessionAudio)
       signal.removeEventListener('abort', onAbort)
       if (this.#playbackEndTimer) clearTimeout(this.#playbackEndTimer)
       this.#playbackEndTimer = undefined
@@ -164,11 +166,6 @@ export class RealtimeAudioBridge {
         case 'thread/realtime/transcript/done':
           this.#handleTranscriptDone(notification.params)
           break
-        case 'thread/realtime/outputAudio/delta': {
-          const chunk = parseAppServerOutputAudio(notification.params, this.#appServer.threadId)
-          if (chunk) this.#handleOutputAudio(chunk)
-          break
-        }
         case 'thread/realtime/error':
           this.#fail(
             new Error(
@@ -208,8 +205,6 @@ export class RealtimeAudioBridge {
       const audible = hasAudiblePcm16(chunk.data)
       if (!audible && !this.#playbackQueue) return
       if (this.#playbackClosing) {
-        if (!audible) return
-        this.#fail(new Error('Codex emitted audible audio after the current playback stream was closed'))
         return
       }
       if (chunk.sampleRate !== this.#outputSourceRate) {
@@ -275,6 +270,7 @@ export class RealtimeAudioBridge {
     this.#playbackController = controller
     this.#playbackReady = ready
     this.#micController?.abort(abortError('switching to speaker playback'))
+    this.#session?.resetMicrophoneAudio()
     this.#playbackTask = (async () => {
       await this.#device.stopMicrophone()
       if (this.#micTask) await this.#micTask.catch(() => undefined)

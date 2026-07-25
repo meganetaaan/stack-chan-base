@@ -101,7 +101,7 @@ function emitAssistantTranscriptDone(appServer: FakeAppServer): void {
   })
 }
 
-describe('RealtimeAudioBridge ordered output source', () => {
+describe('RealtimeAudioBridge WebRTC output source', () => {
   const controllers: AbortController[] = []
   const devices: HoldingPlaybackDevice[] = []
 
@@ -110,7 +110,36 @@ describe('RealtimeAudioBridge ordered output source', () => {
     for (const device of devices) device.playbackDrained.resolve()
   })
 
-  it('plays ordered app-server audio instead of the mirrored RTP media track', async () => {
+  it('plays remote RTP audio when app-server does not mirror output PCM', async () => {
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+
+    for (let index = 0; index < 12; index += 1) {
+      session.emit('audio', mirroredRtpFrame(2_000))
+    }
+
+    await waitUntil(() => device.playbackChunks.length >= 12)
+    expect(decodePcm16Le(device.playbackChunks[0]!.data)[0]).toBe(2_000)
+
+    controller.abort(new Error('RTP source test finished'))
+    device.playbackDrained.resolve()
+    await expect(running).rejects.toThrow('RTP source test finished')
+  })
+
+  it('does not duplicate app-server PCM mirrored from the RTP media track', async () => {
     const appServer = new FakeAppServer()
     const device = new HoldingPlaybackDevice()
     const session = new FakeRealtimeSession()
@@ -133,7 +162,7 @@ describe('RealtimeAudioBridge ordered output source', () => {
     }
 
     await waitUntil(() => device.playbackChunks.length >= 12)
-    expect(decodePcm16Le(device.playbackChunks[0]!.data)[0]).toBe(1_000)
+    expect(decodePcm16Le(device.playbackChunks[0]!.data)[0]).toBe(2_000)
 
     controller.abort(new Error('source test finished'))
     device.playbackDrained.resolve()
@@ -174,7 +203,7 @@ describe('RealtimeAudioBridge ordered output source', () => {
     await expect(running).rejects.toThrow('late RTP test finished')
   })
 
-  it('rejects malformed app-server PCM metadata at the trust boundary', async () => {
+  it('rejects malformed remote RTP PCM at the session boundary', async () => {
     const appServer = new FakeAppServer()
     const device = new HoldingPlaybackDevice()
     const session = new FakeRealtimeSession()
@@ -191,18 +220,11 @@ describe('RealtimeAudioBridge ordered output source', () => {
     )
     const running = bridge.run(controller.signal)
 
-    appServer.emit('notification', {
-      method: 'thread/realtime/outputAudio/delta',
-      params: {
-        threadId: appServer.threadId,
-        audio: {
-          data: 'AA==',
-          sampleRate: 24_000,
-          numChannels: 2,
-          samplesPerChannel: 1,
-          itemId: null,
-        },
-      },
+    session.emit('audio', {
+      data: new Uint8Array([0, 0]),
+      sampleRate: 48_000,
+      channels: 2,
+      format: 's16le',
     })
     await waitUntil(() => errors.length > 0)
 
