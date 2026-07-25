@@ -5,6 +5,10 @@ import {
   ConversationSessionController,
   type ConversationAudioFactory,
 } from '../src/conversation/session-controller.js'
+import type {
+  ConversationChimeKind,
+  ConversationChimePlayer,
+} from '../src/audio/conversation-chime.js'
 import type { CodexAppServer } from '../src/codex/app-server.js'
 import type {
   ConversationRequestEvent,
@@ -196,6 +200,154 @@ describe('ConversationSessionController', () => {
     await controller.close()
   })
 
+  it('finishes the start chime before opening realtime audio', async () => {
+    const events: string[] = []
+    const startChime = new Deferred<void>()
+    const feedback: ConversationChimePlayer = {
+      async play(kind) {
+        events.push(`${kind}-chime-started`)
+        await startChime.promise
+        events.push(`${kind}-chime-finished`)
+      },
+    }
+    audioFactory = vi.fn(() => ({
+      async run(signal: AbortSignal) {
+        events.push('realtime-started')
+        await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      },
+    }))
+    const controller = new ConversationSessionController(device, undefined, {
+      audioFactory,
+      feedback,
+    })
+    const process = new AbortController()
+    const attached = controller.runWithAppServer(
+      appServer as unknown as CodexAppServer,
+      process.signal,
+    )
+
+    device.emitRequest(request('conversation.start', 'start-with-chime'))
+    await waitUntil(() => events.includes('start-chime-started'))
+    expect(events).toEqual(['start-chime-started'])
+
+    startChime.resolve()
+    await waitUntil(() => events.includes('realtime-started'))
+    expect(events).toEqual([
+      'start-chime-started',
+      'start-chime-finished',
+      'realtime-started',
+    ])
+
+    process.abort(new Error('test finished'))
+    await expect(attached).resolves.toBeUndefined()
+    await controller.close()
+  })
+
+  it('plays one stop chime only after realtime audio has released the speaker', async () => {
+    const events: string[] = []
+    const feedback: ConversationChimePlayer = {
+      async play(kind: ConversationChimeKind) {
+        events.push(`${kind}-chime`)
+      },
+    }
+    audioFactory = vi.fn(() => ({
+      async run(signal: AbortSignal) {
+        events.push('realtime-started')
+        try {
+          await new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+          })
+        } finally {
+          events.push('realtime-released')
+        }
+      },
+    }))
+    const controller = new ConversationSessionController(device, undefined, {
+      audioFactory,
+      feedback,
+    })
+    const process = new AbortController()
+    const attached = controller.runWithAppServer(
+      appServer as unknown as CodexAppServer,
+      process.signal,
+    )
+
+    device.emitRequest(request('conversation.start', 'start-before-stop-chime'))
+    await waitUntil(() => events.includes('realtime-started'))
+    const stop = request('conversation.stop', 'same-stop-chime')
+    device.emitRequest(stop)
+    device.emitRequest(stop)
+    await waitUntil(() => device.results.length === 3)
+
+    expect(events).toEqual([
+      'start-chime',
+      'realtime-started',
+      'realtime-released',
+      'stop-chime',
+    ])
+
+    process.abort(new Error('test finished'))
+    await expect(attached).resolves.toBeUndefined()
+    await controller.close()
+  })
+
+  it('lets a backward swipe cancel an unfinished start chime', async () => {
+    const events: string[] = []
+    const feedback: ConversationChimePlayer = {
+      async play(kind, signal) {
+        events.push(`${kind}-chime-started`)
+        if (kind === 'stop') return
+        await new Promise<never>((_resolve, reject) => {
+          if (signal.aborted) reject(signal.reason)
+          else {
+            signal.addEventListener(
+              'abort',
+              () => {
+                events.push('start-chime-aborted')
+                reject(signal.reason)
+              },
+              { once: true },
+            )
+          }
+        })
+      },
+    }
+    const controller = new ConversationSessionController(device, undefined, {
+      audioFactory,
+      feedback,
+    })
+    const process = new AbortController()
+    const attached = controller.runWithAppServer(
+      appServer as unknown as CodexAppServer,
+      process.signal,
+    )
+
+    device.emitRequest(request('conversation.start', 'cancelled-start'))
+    await waitUntil(() => events.includes('start-chime-started'))
+    device.emitRequest(request('conversation.stop', 'superseding-stop'))
+    await waitUntil(
+      () =>
+        device.results.some(
+          (result) => result.requestId === 'superseding-stop',
+        ),
+    )
+
+    expect(events).toEqual([
+      'start-chime-started',
+      'start-chime-aborted',
+      'stop-chime-started',
+    ])
+    expect(runs).toHaveLength(0)
+    expect(controller.desired).toBe(false)
+    expect(controller.state).toBe('standby')
+
+    process.abort(new Error('test finished'))
+    await expect(attached).resolves.toBeUndefined()
+    await controller.close()
+  })
+
   it('ignores stale audio state after stop and starts at most one realtime session', async () => {
     let staleState:
       | ((state: 'listening' | 'recognizing' | 'speaking') => Promise<void>)
@@ -224,7 +376,11 @@ describe('ConversationSessionController', () => {
     device.emitRequest(request('conversation.start', 'start-1'))
     await waitUntil(() => runs.length === 1)
     device.emitRequest(request('conversation.stop', 'stop-1'))
-    await waitUntil(() => runs[0]?.signal?.aborted === true)
+    await waitUntil(
+      () =>
+        runs[0]?.signal?.aborted === true &&
+        device.results.some((result) => result.requestId === 'stop-1'),
+    )
     await staleState?.('speaking')
 
     expect(device.states.at(-1)).toBe('idle')

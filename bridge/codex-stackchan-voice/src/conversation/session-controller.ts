@@ -5,6 +5,11 @@ import {
   type RealtimeAudioState,
   type RealtimeAudioStateSink,
 } from '../audio/bridge.js'
+import {
+  type ConversationChimeKind,
+  type ConversationChimePlayer,
+  UsbConversationChimePlayer,
+} from '../audio/conversation-chime.js'
 import type { CodexAppServer } from '../codex/app-server.js'
 import {
   ExponentialRetryBackoff,
@@ -36,6 +41,7 @@ export type ConversationAudioFactory = (
 
 export type ConversationSessionControllerOptions = {
   audioFactory?: ConversationAudioFactory
+  feedback?: ConversationChimePlayer
 }
 
 const defaultAudioFactory: ConversationAudioFactory = (
@@ -54,6 +60,7 @@ export class ConversationSessionController {
   readonly #device: StackChanDevice
   readonly #voice: string | undefined
   readonly #audioFactory: ConversationAudioFactory
+  readonly #feedback: ConversationChimePlayer
   readonly #requestResults = new Map<string, Promise<ConversationResultEvent>>()
   readonly #unsubscribeRequest: () => void
   #state: ConversationSessionState = 'standby'
@@ -63,7 +70,11 @@ export class ConversationSessionController {
   #blocked = false
   #closed = false
   #generation = 0
+  #requestGeneration = 0
   #activeController: AbortController | undefined
+  #activeAttemptStopped: Promise<void> | undefined
+  #feedbackController: AbortController | undefined
+  #feedbackTask: Promise<void> | undefined
   #attachment: Attachment | undefined
   #wake = new Deferred<void>()
 
@@ -75,6 +86,7 @@ export class ConversationSessionController {
     this.#device = device
     this.#voice = voice
     this.#audioFactory = options.audioFactory ?? defaultAudioFactory
+    this.#feedback = options.feedback ?? new UsbConversationChimePlayer(device)
     this.#unsubscribeRequest = device.onConversationRequest((request) => {
       void this.handleRequest(request)
         .then((result) => device.sendConversationResult(result))
@@ -118,10 +130,12 @@ export class ConversationSessionController {
 
   async block(error: unknown): Promise<void> {
     if (this.#closed) return
+    this.#requestGeneration += 1
     this.#desired = false
     this.#blocked = true
     this.#generation += 1
     this.#activeController?.abort(normalizeError(error))
+    await this.#cancelFeedback(normalizeError(error))
     await this.#transition('blocked')
     this.#signalWake()
   }
@@ -159,53 +173,83 @@ export class ConversationSessionController {
         }
         const generation = ++this.#generation
         const attempt = new AbortController()
+        const attemptStopped = new Deferred<void>()
+        const attemptStoppedPromise = attemptStopped.promise
         this.#activeController = attempt
+        this.#activeAttemptStopped = attemptStoppedPromise
         const onAttachmentAbort = () => {
           attempt.abort(attachment.controller.signal.reason ?? abortError())
         }
-        attachment.controller.signal.addEventListener('abort', onAttachmentAbort, { once: true })
-        await this.#transition('connecting')
-        const startedAt = performance.now()
+        attachment.controller.signal.addEventListener('abort', onAttachmentAbort, {
+          once: true,
+        })
         try {
-          const audio = this.#audioFactory(
-            appServer,
-            this.#device,
-            this.#voice,
-            (state) => this.#acceptAudioState(generation, state),
-          )
-          await audio.run(attempt.signal)
-          if (this.#desired && !attempt.signal.aborted) {
-            throw new Error('Codex realtime audio bridge stopped unexpectedly')
-          }
-        } catch (error) {
-          if (attachment.controller.signal.aborted || this.#closed) break
-          if (attempt.signal.aborted) continue
-          if (retryDisposition(error) === 'stop') {
-            await this.block(error)
-            continue
-          }
-          if (!this.#desired) continue
-          console.warn(`Codex realtimeセッション停止: ${errorMessage(error)}`)
           await this.#transition('connecting')
-          const retryMilliseconds = backoff.afterFailure(performance.now() - startedAt)
-          console.log(`Codex realtime再接続待ち: ${retryMilliseconds}ms`)
-          const retry = new AbortController()
-          this.#activeController = retry
-          const onRetryAttachmentAbort = () => {
-            retry.abort(attachment.controller.signal.reason ?? abortError())
-          }
-          attachment.controller.signal.addEventListener('abort', onRetryAttachmentAbort, { once: true })
+          if (attempt.signal.aborted || !this.#desired) continue
+          const startedAt = performance.now()
           try {
-            await delay(retryMilliseconds, retry.signal)
-          } catch (retryError) {
-            if (!retry.signal.aborted) throw retryError
-          } finally {
-            attachment.controller.signal.removeEventListener('abort', onRetryAttachmentAbort)
-            if (this.#activeController === retry) this.#activeController = undefined
+            const audio = this.#audioFactory(
+              appServer,
+              this.#device,
+              this.#voice,
+              (state) => this.#acceptAudioState(generation, state),
+            )
+            await audio.run(attempt.signal)
+            if (this.#desired && !attempt.signal.aborted) {
+              throw new Error('Codex realtime audio bridge stopped unexpectedly')
+            }
+          } catch (error) {
+            if (attachment.controller.signal.aborted || this.#closed) break
+            if (attempt.signal.aborted) continue
+            if (retryDisposition(error) === 'stop') {
+              await this.block(error)
+              continue
+            }
+            if (!this.#desired) continue
+            console.warn(`Codex realtimeセッション停止: ${errorMessage(error)}`)
+            await this.#transition('connecting')
+            const retryMilliseconds = backoff.afterFailure(
+              performance.now() - startedAt,
+            )
+            console.log(
+              `Codex realtime再接続待ち: ${retryMilliseconds}ms`,
+            )
+            const retry = new AbortController()
+            this.#activeController = retry
+            const onRetryAttachmentAbort = () => {
+              retry.abort(
+                attachment.controller.signal.reason ?? abortError(),
+              )
+            }
+            attachment.controller.signal.addEventListener(
+              'abort',
+              onRetryAttachmentAbort,
+              { once: true },
+            )
+            try {
+              await delay(retryMilliseconds, retry.signal)
+            } catch (retryError) {
+              if (!retry.signal.aborted) throw retryError
+            } finally {
+              attachment.controller.signal.removeEventListener(
+                'abort',
+                onRetryAttachmentAbort,
+              )
+              if (this.#activeController === retry) {
+                this.#activeController = undefined
+              }
+            }
           }
         } finally {
-          attachment.controller.signal.removeEventListener('abort', onAttachmentAbort)
+          attachment.controller.signal.removeEventListener(
+            'abort',
+            onAttachmentAbort,
+          )
           if (this.#activeController === attempt) this.#activeController = undefined
+          attemptStopped.resolve()
+          if (this.#activeAttemptStopped === attemptStoppedPromise) {
+            this.#activeAttemptStopped = undefined
+          }
         }
       }
     } finally {
@@ -221,12 +265,14 @@ export class ConversationSessionController {
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
+    this.#requestGeneration += 1
     this.#desired = false
     this.#blocked = false
     this.#generation += 1
     this.#unsubscribeRequest()
     this.#activeController?.abort(abortError('conversation controller closed'))
     this.#attachment?.controller.abort(abortError('conversation controller closed'))
+    await this.#cancelFeedback(abortError('conversation controller closed'))
     this.#signalWake()
     await this.#transition('standby', true)
     await this.#stateWrite.catch(() => undefined)
@@ -243,9 +289,25 @@ export class ConversationSessionController {
     }
     if (request.type === 'conversation.start') {
       const alreadyDesired = this.#desired && !this.#blocked
+      const requestGeneration = alreadyDesired
+        ? this.#requestGeneration
+        : ++this.#requestGeneration
       this.#blocked = false
-      this.#desired = true
       await this.#transition(alreadyDesired ? this.#state : 'connecting')
+      if (!alreadyDesired) {
+        await this.#playFeedback('start')
+        if (
+          this.#closed ||
+          requestGeneration !== this.#requestGeneration
+        ) {
+          return conversationResultEvent(
+            request.requestId,
+            true,
+            this.#state,
+          )
+        }
+        this.#desired = true
+      }
       this.#signalWake()
       return conversationResultEvent(
         request.requestId,
@@ -254,12 +316,27 @@ export class ConversationSessionController {
       )
     }
 
+    const requestGeneration = ++this.#requestGeneration
     this.#desired = false
     this.#blocked = false
     this.#generation += 1
-    this.#activeController?.abort(abortError('conversation stopped by backward swipe'))
+    const attemptStopped = this.#activeAttemptStopped
+    this.#activeController?.abort(
+      abortError('conversation stopped by backward swipe'),
+    )
+    await this.#cancelFeedback(
+      abortError('conversation stopped by backward swipe'),
+    )
     await this.#transition('standby')
     this.#signalWake()
+    await attemptStopped?.catch(() => undefined)
+    if (
+      !this.#closed &&
+      requestGeneration === this.#requestGeneration &&
+      !this.#desired
+    ) {
+      await this.#playFeedback('stop')
+    }
     return conversationResultEvent(request.requestId, true, 'standby')
   }
 
@@ -303,6 +380,40 @@ export class ConversationSessionController {
     const wake = this.#wake
     this.#wake = new Deferred<void>()
     wake.resolve()
+  }
+
+  async #playFeedback(kind: ConversationChimeKind): Promise<void> {
+    await this.#cancelFeedback(abortError('conversation feedback replaced'))
+    if (this.#closed || !this.#device.connected) return
+    const controller = new AbortController()
+    this.#feedbackController = controller
+    const task = this.#feedback.play(kind, controller.signal)
+    this.#feedbackTask = task
+    try {
+      await task
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        console.warn(
+          `会話${kind === 'start' ? '開始' : '終了'}音の再生に失敗: ${errorMessage(error)}`,
+        )
+      }
+    } finally {
+      if (this.#feedbackController === controller) {
+        this.#feedbackController = undefined
+      }
+      if (this.#feedbackTask === task) this.#feedbackTask = undefined
+    }
+  }
+
+  async #cancelFeedback(reason: Error): Promise<void> {
+    const controller = this.#feedbackController
+    const task = this.#feedbackTask
+    controller?.abort(reason)
+    await task?.catch(() => undefined)
+    if (this.#feedbackController === controller) {
+      this.#feedbackController = undefined
+    }
+    if (this.#feedbackTask === task) this.#feedbackTask = undefined
   }
 
   async #waitForWake(signal: AbortSignal): Promise<void> {

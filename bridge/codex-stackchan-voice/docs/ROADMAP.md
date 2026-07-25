@@ -2,7 +2,7 @@
 
 更新日: 2026-07-25
 
-状態: 会話の常駐運用とMIC停止再送を実装済み、30分安定性評価と表情ツールは未実施
+状態: 会話の常駐運用、開始終了Tone、MIC停止再送を実装済み、30分安定性評価と表情ツールは未実施
 
 ## 実装した利用方法
 
@@ -12,6 +12,11 @@ standbyではRealtime WebRTCセッションとCoreS3マイクを開始しない�
 Codex専用MODは、頭上タッチセンサの前方スワイプを会話開始、後方スワイプを会話停止として扱う。
 単純なタッチでは会話状態を変更しない。
 このMODは既定の`onContextCreated`を置き換えるため、既定の撫で動作とボタン操作は同時に動作しない。
+
+前方スワイプでは660 Hzから990 Hzへ上がる開始音を鳴らしてから、Realtimeとマイクを開始する。
+後方スワイプではRealtimeを停止し、応答音声がスピーカーを解放してから990 Hzから660 Hzへ下がる終了音を鳴らす。
+Toneはブリッジが24 kHzのPCMとして生成し、既存のUSBスピーカー経路へ直列化する。
+MOD側のTone APIは使わず、USB音声と別のAudioOutが同時に物理スピーカーを所有する競合を避ける。
 
 一つのサービスプロセス内では同じCodex threadを再利用する。
 サービスを再起動し、`--thread`を指定しなかった場合は新しいthreadを開始する。
@@ -23,7 +28,7 @@ Codex専用MODは、頭上タッチセンサの前方スワイプを会話開始
 | 内部状態 | Realtime | CoreS3マイク | 画面 |
 | --- | --- | --- | --- |
 | `standby` | 停止 | 停止 | なし |
-| `connecting` | 接続中 | 停止 | 琥珀色の回転表示 |
+| `connecting` | 開始前または接続中 | 停止 | 琥珀色の回転表示 |
 | `listening` | 接続済み | 動作中 | 通常マイク |
 | `recognizing` | 接続済み | 動作中 | 白色の回転表示 |
 | `speaking` | 接続済み | 停止 | ミュートマイク |
@@ -68,6 +73,7 @@ unitは`Restart=on-failure`、`RestartSec=2`、`TimeoutStopSec=15`を設定す�
 
 bridge側はNode testとVitestでUSB framing、event parser、状態遷移、再試行、WebRTC、systemd unit生成を検査する。
 start、stop、重複要求、blockedの長さ4までの全341操作列を列挙し、desired stateと表示状態の不変条件を確認する。
+開始終了Toneは音程順序とPCM境界に加え、開始音がRealtimeより先に終わること、終了音がRealtimeのスピーカー解放後に一度だけ鳴ること、後方スワイプが未完了の開始音を中断することを検査する。
 生成したunitは文字列比較だけでなく、実ホストの`systemd-analyze verify`にも通す。
 
 Firmware側はNode testでevent再送、10秒timeout、遅延result、状態表示の対応を検査する。
@@ -94,6 +100,10 @@ hostは同一streamの`MIC_STOP`を500ミリ秒ごとに再送し、Firmwareは�
 
 修正後の実機では、同じsystemdプロセスで約79秒間に6回の応答を連続再生した。
 各応答前後のマイク停止と再開を通過し、`MIC_STOPPED` timeout、Realtime再接続、systemd再起動はいずれも発生しなかった。
+
+開始終了Toneを含むbuildへサービスを更新した後、約6分間に17回の応答再生を通過した。
+この間、USB音声競合、Realtime再接続、音声ブリッジエラー、systemd再起動は記録されなかった。
+開始音と終了音の音程方向は自動テストで検査済みだが、実機での聴感確認は未実施である。
 
 30分のsoak test、USB物理抜線後の再接続、app-server実プロセス再起動は未実施である。
 
