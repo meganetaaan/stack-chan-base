@@ -1,5 +1,10 @@
 import { chmod } from 'node:fs/promises'
 
 if (process.platform !== 'win32') {
-  await chmod(new URL('../dist/src/cli.js', import.meta.url), 0o755)
+  await Promise.all(
+    [
+      '../dist/src/cli.js',
+      '../dist/src/service/install-user-service.js',
+    ].map((path) => chmod(new URL(path, import.meta.url), 0o755)),
+  )
 }

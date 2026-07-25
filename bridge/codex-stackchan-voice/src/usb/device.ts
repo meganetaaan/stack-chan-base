@@ -10,6 +10,8 @@ import type {
 } from '../types.js'
 import {
   approvalRequestEvent,
+  type ConversationRequestEvent,
+  type ConversationResultEvent,
   parseStackChanApplicationEvent,
   STACKCHAN_EVENT_SCHEMA,
   type ApprovalResolvedEvent,
@@ -93,6 +95,7 @@ type PendingApproval = {
 
 export type UsbStackChanDeviceOptions = {
   portPath?: string
+  deviceId?: string
   portFactory?: (path: string) => SerialPortLike
   openSettleMilliseconds?: number
   controlTimeoutMilliseconds?: number
@@ -107,6 +110,7 @@ export class UsbStackChanDevice implements StackChanDevice {
   readonly #eventDecoder = new StackChanEventDecoder()
   readonly #waiters = new Set<FrameWaiter>()
   readonly #pendingApprovals = new Map<string, PendingApproval>()
+  readonly #conversationRequestListeners = new Set<(request: ConversationRequestEvent) => void>()
   #port: SerialPortLike | undefined
   #connected = false
   #closing = false
@@ -117,6 +121,9 @@ export class UsbStackChanDevice implements StackChanDevice {
   #speaker: SpeakerSession | undefined
 
   constructor(options: UsbStackChanDeviceOptions = {}) {
+    if (options.portPath && options.deviceId) {
+      throw new Error('USB portPath and deviceId are mutually exclusive')
+    }
     if (
       options.openSettleMilliseconds !== undefined &&
       (!Number.isFinite(options.openSettleMilliseconds) || options.openSettleMilliseconds < 0)
@@ -140,7 +147,8 @@ export class UsbStackChanDevice implements StackChanDevice {
   async connect(signal: AbortSignal): Promise<DeviceCapabilities> {
     throwIfAborted(signal)
     if (this.#port) throw new Error('USB device is already opening or connected')
-    const portPath = this.#options.portPath ?? (await discoverStackChanPort())
+    const portPath =
+      this.#options.portPath ?? (await discoverStackChanPort(this.#options.deviceId))
     const port =
       this.#options.portFactory?.(portPath) ??
       (new SerialPort({ path: portPath, baudRate: 115_200, autoOpen: false }) as unknown as SerialPortLike)
@@ -203,7 +211,7 @@ export class UsbStackChanDevice implements StackChanDevice {
     }
   }
 
-  async *microphone(signal: AbortSignal): AsyncIterable<PcmChunk> {
+  async *microphone(signal: AbortSignal, onStarted?: () => void): AsyncIterable<PcmChunk> {
     throwIfAborted(signal)
     this.#assertConnected()
     if (this.#microphone) throw new Error('microphone session is already active')
@@ -220,6 +228,7 @@ export class UsbStackChanDevice implements StackChanDevice {
     const started = this.#waitForControl(StackChanControl.MIC_STARTED, streamId)
     await this.#sendControl(StackChanControl.MIC_START, MICROPHONE_SAMPLE_RATE, undefined, streamId)
     await started
+    onStarted?.()
     const onAbort = () => {
       void this.stopMicrophone().catch(() => {
         // The generator or device close path observes the shared stop task.
@@ -326,8 +335,30 @@ export class UsbStackChanDevice implements StackChanDevice {
   async setConversationState(state: ConversationState): Promise<void> {
     this.#assertConnected()
     if ((this.#peerCapabilities & StackChanCapability.STATUS_ICON) === 0) return
-    const wireValue = state === 'recognizing' ? 1 : state === 'speaking' ? 2 : 0
+    const extended = (this.#peerCapabilities & StackChanCapability.STATUS_EXTENDED) !== 0
+    const wireValue =
+      state === 'recognizing'
+        ? 1
+        : state === 'speaking'
+          ? 2
+          : extended && state === 'listening'
+            ? 3
+            : extended && state === 'connecting'
+              ? 4
+              : extended && state === 'error'
+                ? 5
+                : 0
     await this.#sendControl(StackChanControl.STATUS, 0, Uint8Array.of(wireValue), 0)
+  }
+
+  onConversationRequest(listener: (request: ConversationRequestEvent) => void): () => void {
+    this.#conversationRequestListeners.add(listener)
+    return () => this.#conversationRequestListeners.delete(listener)
+  }
+
+  async sendConversationResult(result: ConversationResultEvent): Promise<void> {
+    if (!this.#connected) return
+    await this.#sendSerializedEvent(JSON.stringify(result))
   }
 
   async requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
@@ -543,6 +574,11 @@ export class UsbStackChanDevice implements StackChanDevice {
   #handleEvent(serialized: string): void {
     const event = parseStackChanApplicationEvent(serialized)
     if (!event) return
+    if (event.type === 'conversation.start' || event.type === 'conversation.stop') {
+      for (const listener of this.#conversationRequestListeners) listener(event)
+      return
+    }
+    if (!event.type.startsWith('approval.')) return
     const pending = this.#pendingApprovals.get(event.requestId)
     if (!pending) return
     if (event.type === 'approval.presented') {
@@ -660,27 +696,83 @@ export class UsbStackChanDevice implements StackChanDevice {
       approval.response.reject(reason)
     }
     this.#pendingApprovals.clear()
+    this.#conversationRequestListeners.clear()
     this.#port = undefined
     if (!this.#closing && port) void closeSerialPort(port)
     this.#closedDeferred.resolve(error)
   }
 }
 
-export async function discoverStackChanPort(): Promise<string> {
-  const matches = (await SerialPort.list()).filter(
+export type StackChanPortInfo = {
+  path: string
+  vendorId: string | undefined
+  productId: string | undefined
+  serialNumber: string | undefined
+}
+
+export async function discoverStackChanPort(deviceId?: string): Promise<string> {
+  return selectStackChanPort(await SerialPort.list(), deviceId)
+}
+
+export async function discoverStackChanDeviceId(portPath: string): Promise<string> {
+  return selectStackChanDeviceId(await SerialPort.list(), portPath)
+}
+
+export function selectStackChanPort(
+  ports: StackChanPortInfo[],
+  deviceId?: string,
+): string {
+  const compatible = ports.filter(
     (port) =>
       port.vendorId?.toLowerCase() === CORES3_USB_VENDOR_ID &&
       port.productId?.toLowerCase() === CORES3_USB_PRODUCT_ID,
   )
+  const matches =
+    deviceId === undefined
+      ? compatible
+      : compatible.filter((port) => port.serialNumber === deviceId)
   if (matches.length === 0) {
+    if (deviceId !== undefined) {
+      throw new Error(
+        `USB device ID "${deviceId}" のCoreS3（VID 303A / PID 1001）が見つかりません`,
+      )
+    }
     throw new Error('VID 303A / PID 1001 のCoreS3 USBポートが見つかりません')
   }
   if (matches.length > 1) {
-    throw new Error(`CoreS3 USBポートが複数あります。--portで指定してください: ${matches.map((port) => port.path).join(', ')}`)
+    throw new Error(
+      `CoreS3 USBポートが複数あります。--device-idまたは--portで指定してください: ${matches
+        .map((port) => port.path)
+        .join(', ')}`,
+    )
   }
   const path = matches[0]?.path
   if (!path) throw new Error('CoreS3 USBポートのpathを取得できません')
   return path
+}
+
+export function selectStackChanDeviceId(
+  ports: StackChanPortInfo[],
+  portPath: string,
+): string {
+  const port = ports.find((candidate) => candidate.path === portPath)
+  if (!port) {
+    throw new Error(`${portPath} がUSB serial port一覧に見つかりません`)
+  }
+  if (
+    port.vendorId?.toLowerCase() !== CORES3_USB_VENDOR_ID ||
+    port.productId?.toLowerCase() !== CORES3_USB_PRODUCT_ID
+  ) {
+    throw new Error(
+      `${portPath} はVID 303A / PID 1001のCoreS3ではありません`,
+    )
+  }
+  if (!port.serialNumber) {
+    throw new Error(
+      `${portPath} のUSB serial numberを取得できないため常駐サービスへ固定できません`,
+    )
+  }
+  return port.serialNumber
 }
 
 function openPort(port: SerialPortLike, signal: AbortSignal): Promise<void> {
@@ -738,6 +830,7 @@ function capabilitiesFrom(maxPayload: number, capabilities: number): DeviceCapab
     speakerCredit: (capabilities & StackChanCapability.SPEAKER_CREDIT) !== 0,
     speakerRate24000: (capabilities & StackChanCapability.SPEAKER_RATE_24000) !== 0,
     statusIcon: (capabilities & StackChanCapability.STATUS_ICON) !== 0,
+    statusExtended: (capabilities & StackChanCapability.STATUS_EXTENDED) !== 0,
     streamId: (capabilities & StackChanCapability.STREAM_ID) !== 0,
     event: (capabilities & StackChanCapability.EVENT) !== 0,
   }

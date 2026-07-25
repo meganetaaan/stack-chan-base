@@ -231,6 +231,40 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     expect(errors[0]).toContain('mono')
     await expect(running).rejects.toThrow('mono')
   })
+
+  it('turns an asynchronous conversation status failure into a bridge failure', async () => {
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+      async (state) => {
+        if (state === 'listening') {
+          throw new Error('STATUS transport failed')
+        }
+      },
+    )
+    const running = bridge.run(controller.signal)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    appServer.emit('notification', {
+      method: 'thread/realtime/itemAdded',
+      params: {
+        threadId: appServer.threadId,
+        item: { type: 'input_audio_buffer.speech_started' },
+      },
+    })
+
+    await expect(running).rejects.toThrow('STATUS transport failed')
+  })
 })
 
 async function waitUntil(predicate: () => boolean): Promise<void> {

@@ -13,6 +13,10 @@ import type {
   StackChanDevice,
 } from '../src/types.js'
 import { Deferred } from '../src/async.js'
+import type {
+  ConversationRequestEvent,
+  ConversationResultEvent,
+} from '../src/usb/events.js'
 
 class FakeDevice implements StackChanDevice {
   connected = true
@@ -32,6 +36,14 @@ class FakeDevice implements StackChanDevice {
   async playAudio(_source: AsyncIterable<PcmChunk>, _signal: AbortSignal): Promise<void> {}
 
   async setConversationState(_state: ConversationState): Promise<void> {}
+
+  onConversationRequest(
+    _listener: (request: ConversationRequestEvent) => void,
+  ): () => void {
+    return () => undefined
+  }
+
+  async sendConversationResult(_result: ConversationResultEvent): Promise<void> {}
 
   async requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
     this.requests.push(request)

@@ -70,7 +70,13 @@ Firmwareがcapability bit 6を返した場合、USBホストは各文のPCM直�
 このcapabilityは任意であり、未対応Firmwareに対してUSBホストは字幕を送らない。
 中断時は`SPEAKER_ABORT`を送る。
 Firmwareがcapability bit 8を返した場合、USBホストは`STATUS=48`で会話状態を送る。
-payloadは1 byteで、`IDLE=0`、`RECOGNIZING=1`、`SPEAKING=2`とする。
+payloadは1 byteで、既存値を`IDLE=0`、`RECOGNIZING=1`、`SPEAKING=2`とする。
+
+Firmwareがcapability bit 11の`STATUS_EXTENDED`を返した場合、USBホストは`LISTENING=3`、`CONNECTING=4`、`ERROR=5`も送信できる。
+`LISTENING`はCoreS3の`MIC_STARTED`確認後だけ表示し、準備中の状態と区別する。
+`CONNECTING`はapp-serverまたはRealtimeへの接続中、`ERROR`は利用上限などの再試行不能状態を表す。
+bit 11を返さないFirmwareに対して、USBホストは拡張状態を`IDLE=0`へ縮退させる。
+既存の`STATUS_ICON` bitと値0から2の意味は変更しない。
 
 ## Application event
 
@@ -96,6 +102,44 @@ Codex音声ブリッジは、コマンド実行とファイル変更を次の共
 | Firmware → host | `approval.response` | `decision`を`approve`または`decline`で返す |
 | host → Firmware | `approval.resolved` | 自端末または別clientで処理済みの画面を閉じる |
 | host → Firmware | `approval.suspended` | app-server再接続中として操作を一時停止する |
+| Firmware → host | `conversation.start` | 頭上センサの前方スワイプによる会話開始を要求する |
+| Firmware → host | `conversation.stop` | 頭上センサの後方スワイプによる会話停止を要求する |
+| host → Firmware | `conversation.result` | 会話操作の受理結果と現在状態を返す |
+
+会話開始要求は次の形にする。
+
+```json
+{
+  "schema": "stackchan.event.v1",
+  "type": "conversation.start",
+  "requestId": "conversation-a1b2c3d4-42",
+  "source": "headTouch",
+  "gesture": "forwardSwipe"
+}
+```
+
+停止要求は`type="conversation.stop"`、`gesture="backwardSwipe"`とする。
+開始と停止はtoggleとして解釈せず、明示された操作だけを適用する。
+
+hostは次の形で結果を返す。
+
+```json
+{
+  "schema": "stackchan.event.v1",
+  "type": "conversation.result",
+  "requestId": "conversation-a1b2c3d4-42",
+  "success": true,
+  "state": "connecting"
+}
+```
+
+`state`は`standby`、`connecting`、`listening`、`recognizing`、`speaking`、`blocked`のいずれかとする。
+失敗時は`success=false`と短い`error`文字列を追加できる。
+
+Firmwareは結果を受信するまで、同じeventを同じ`requestId`で2秒ごとに再送する。
+再送は10秒で停止し、画面をエラー状態へ移す。
+hostは直近64件の結果を保持し、同じ`requestId`の再送で会話を二重に開始または停止しない。
+異なる論理操作に同じ`requestId`を再利用しない。
 
 `approval.request`の詳細本文は16 KiBまでとし、切り詰めた場合は`truncated=true`を設定する。
 hostは`approval.presented`を受け取るまで同じ`requestId`のrequestを再送でき、Firmwareは冪等に扱う。

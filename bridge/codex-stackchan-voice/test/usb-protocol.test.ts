@@ -3,6 +3,8 @@ import test from 'node:test'
 import {
   decodeStackChanFrame,
   encodeStackChanFrame,
+  STACKCHAN_HOST_CAPABILITIES,
+  StackChanCapability,
   StackChanControl,
   StackChanEventDecoder,
   StackChanEventEncoder,
@@ -87,4 +89,9 @@ test('EVENT rejects payloads larger than the contract limit', () => {
     () => new StackChanEventEncoder().encode(new Uint8Array(STACKCHAN_MAX_EVENT_BYTES + 1)),
     /event is too large/,
   )
+})
+
+test('extended conversation status capability uses the next contract bit', () => {
+  assert.equal(StackChanCapability.STATUS_EXTENDED, 1 << 11)
+  assert.notEqual(STACKCHAN_HOST_CAPABILITIES & StackChanCapability.STATUS_EXTENDED, 0)
 })

@@ -5,7 +5,8 @@
   "description": "Bridge Stack-chan USB audio and approval events to Codex app-server realtime.",
   "type": "module",
   "bin": {
-    "stackchan-codex-voice": "./dist/src/cli.js"
+    "stackchan-codex-voice": "./dist/src/cli.js",
+    "stackchan-codex-voice-install-service": "./dist/src/service/install-user-service.js"
   },
   "files": [
     "dist",
@@ -21,6 +22,7 @@
     "postbuild": "node scripts/make-cli-executable.mjs",
     "clean": "rm -rf dist",
     "generate:codex-types": "node scripts/generate-codex-types.mjs",
+    "install:user-service": "node dist/src/service/install-user-service.js",
     "test": "npm run test:node && npm run test:vitest",
     "test:node": "npm run build && node --test \"dist/**/*.test.js\"",
     "test:vitest": "vitest run",

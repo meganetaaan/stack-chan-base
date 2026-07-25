@@ -10,7 +10,7 @@ test('CLI defaults to a new thread in the current directory', () => {
   assert.equal(parsed.options.threadId, undefined)
 })
 
-test('CLI accepts explicit thread, port, voice, and socket', () => {
+test('CLI accepts explicit thread, port, voice, socket, and immediate startup', () => {
   const parsed = parseCliOptions([
     '--cwd',
     '/tmp/project',
@@ -22,6 +22,7 @@ test('CLI accepts explicit thread, port, voice, and socket', () => {
     'marin',
     '--socket',
     '/tmp/codex.sock',
+    '--start-immediately',
   ])
   assert.deepEqual(parsed, {
     kind: 'run',
@@ -31,6 +32,28 @@ test('CLI accepts explicit thread, port, voice, and socket', () => {
       portPath: '/dev/ttyACM0',
       voice: 'marin',
       socketPath: '/tmp/codex.sock',
+      startImmediately: true,
     },
   })
+})
+
+test('CLI accepts a stable USB device ID', () => {
+  const parsed = parseCliOptions(['--device-id', 'STACKCHAN-CORE-S3'])
+  assert.equal(parsed.kind, 'run')
+  if (parsed.kind !== 'run') return
+  assert.equal(parsed.options.deviceId, 'STACKCHAN-CORE-S3')
+  assert.equal(parsed.options.portPath, undefined)
+})
+
+test('CLI rejects ambiguous simultaneous port and device ID selectors', () => {
+  assert.throws(
+    () =>
+      parseCliOptions([
+        '--port',
+        '/dev/ttyACM0',
+        '--device-id',
+        'STACKCHAN-CORE-S3',
+      ]),
+    /mutually exclusive/,
+  )
 })

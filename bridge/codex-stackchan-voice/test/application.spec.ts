@@ -3,13 +3,15 @@ import type { CliOptions } from '../src/cli-options.js'
 
 const harness = vi.hoisted(() => ({
   abortController: undefined as AbortController | undefined,
-  audioErrors: [] as Error[],
-  audioRuns: 0,
-  abortOnDelay: false,
-  appServerFailures: 0,
+  appServerConnects: 0,
+  controllerActivations: 0,
+  controllerAttachments: 0,
+  controllerCloses: 0,
+  controllerOutcomes: [] as Array<
+    'app-server-disconnect' | 'usb-disconnect' | 'finish'
+  >,
   declineCalls: 0,
   delayCalls: [] as number[],
-  deviceFailures: 0,
   suspendCalls: 0,
   usbCloses: 0,
   usbConnects: 0,
@@ -19,9 +21,6 @@ const harness = vi.hoisted(() => ({
 vi.mock('../src/async.js', () => ({
   delay: vi.fn(async (milliseconds: number) => {
     harness.delayCalls.push(milliseconds)
-    if (harness.abortOnDelay) {
-      harness.abortController?.abort(new Error('test retry cutoff'))
-    }
   }),
 }))
 
@@ -42,15 +41,24 @@ vi.mock('../src/approval/manager.js', () => ({
 
 vi.mock('../src/codex/rpc.js', () => ({
   connectCodexDaemon: vi.fn(async () => {
+    harness.appServerConnects += 1
+    let resolveClosed: ((error: Error | undefined) => void) | undefined
     const connection = {
       isClosed: false,
-      closed: new Promise<Error | undefined>(() => undefined),
+      closed: new Promise<Error | undefined>((resolve) => {
+        resolveClosed = resolve
+      }),
+      disconnect(error?: Error): void {
+        if (this.isClosed) return
+        this.isClosed = true
+        resolveClosed?.(error)
+      },
     }
     return {
       connection,
       socketPath: '/tmp/fake-app-server.sock',
       async close(): Promise<void> {
-        connection.isClosed = true
+        connection.disconnect()
       },
     }
   }),
@@ -61,10 +69,15 @@ vi.mock('../src/codex/app-server.js', () => ({
     readonly rpc: {
       isClosed: boolean
       closed: Promise<Error | undefined>
+      disconnect(error?: Error): void
     }
     readonly threadId = 'thread-test'
 
-    constructor(rpc: { isClosed: boolean; closed: Promise<Error | undefined> }) {
+    constructor(rpc: {
+      isClosed: boolean
+      closed: Promise<Error | undefined>
+      disconnect(error?: Error): void
+    }) {
       this.rpc = rpc
     }
 
@@ -113,59 +126,81 @@ vi.mock('../src/codex/app-server.js', () => ({
 vi.mock('../src/usb/device.js', () => ({
   UsbStackChanDevice: class {
     connected = true
-    readonly closed = new Promise<Error | undefined>(() => undefined)
+    readonly closed: Promise<Error | undefined>
+    #resolveClosed: ((error: Error | undefined) => void) | undefined
+    #closed = false
+
+    constructor() {
+      this.closed = new Promise<Error | undefined>((resolve) => {
+        this.#resolveClosed = resolve
+      })
+    }
 
     async connect(): Promise<{
       maxPayload: number
       event: boolean
       statusIcon: boolean
+      statusExtended: boolean
     }> {
       harness.usbConnects += 1
-      return { maxPayload: 4_096, event: true, statusIcon: true }
+      return {
+        maxPayload: 4_096,
+        event: true,
+        statusIcon: true,
+        statusExtended: true,
+      }
+    }
+
+    disconnect(error = new Error('CoreS3 USB disconnected')): void {
+      if (this.#closed) return
+      this.#closed = true
+      this.connected = false
+      this.#resolveClosed?.(error)
     }
 
     async close(): Promise<void> {
+      if (!this.#closed) this.disconnect()
       harness.usbCloses += 1
-      this.connected = false
     }
   },
 }))
 
-vi.mock('../src/audio/bridge.js', () => ({
-  RealtimeAudioBridge: class {
-    readonly appServer: {
-      rpc: {
-        isClosed: boolean
-      }
-    }
+vi.mock('../src/conversation/session-controller.js', () => ({
+  ConversationSessionController: class {
     readonly device: {
-      connected: boolean
+      disconnect(error?: Error): void
     }
 
-    constructor(
-      appServer: { rpc: { isClosed: boolean } },
-      device: { connected: boolean },
-    ) {
-      this.appServer = appServer
+    constructor(device: { disconnect(error?: Error): void }) {
       this.device = device
     }
 
-    async run(): Promise<void> {
-      harness.audioRuns += 1
-      if (harness.appServerFailures > 0) {
-        harness.appServerFailures -= 1
-        this.appServer.rpc.isClosed = true
-        throw new Error('codex app-server disconnected')
+    async activate(): Promise<void> {
+      harness.controllerActivations += 1
+    }
+
+    async runWithAppServer(
+      appServer: {
+        rpc: {
+          disconnect(error?: Error): void
+        }
+      },
+    ): Promise<void> {
+      harness.controllerAttachments += 1
+      const outcome = harness.controllerOutcomes.shift() ?? 'finish'
+      if (outcome === 'app-server-disconnect') {
+        appServer.rpc.disconnect(new Error('codex app-server disconnected'))
+        return
       }
-      if (harness.deviceFailures > 0) {
-        harness.deviceFailures -= 1
-        this.device.connected = false
-        throw new Error('CoreS3 USB disconnected')
+      if (outcome === 'usb-disconnect') {
+        this.device.disconnect()
+        return
       }
-      const error = harness.audioErrors.shift()
-      if (error) throw error
       harness.abortController?.abort(new Error('test scenario finished'))
-      throw harness.abortController?.signal.reason
+    }
+
+    async close(): Promise<void> {
+      harness.controllerCloses += 1
     }
   },
 }))
@@ -176,16 +211,16 @@ const OPTIONS: CliOptions = {
   cwd: '/workspace',
 }
 
-describe('application retry supervision', () => {
+describe('application connection supervision', () => {
   beforeEach(() => {
     harness.abortController = new AbortController()
-    harness.audioErrors = []
-    harness.audioRuns = 0
-    harness.abortOnDelay = false
-    harness.appServerFailures = 0
+    harness.appServerConnects = 0
+    harness.controllerActivations = 0
+    harness.controllerAttachments = 0
+    harness.controllerCloses = 0
+    harness.controllerOutcomes = []
     harness.declineCalls = 0
     harness.delayCalls = []
-    harness.deviceFailures = 0
     harness.suspendCalls = 0
     harness.usbCloses = 0
     harness.usbConnects = 0
@@ -194,22 +229,29 @@ describe('application retry supervision', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
   })
 
-  it('stops instead of reconnecting when app-server reports the Voice usage limit', async () => {
-    harness.audioErrors = [new Error('You have reached your usage limit.')]
-    harness.abortOnDelay = true
+  it('keeps Realtime stopped until an explicit conversation start request', async () => {
+    harness.controllerOutcomes = ['finish']
 
-    await expect(
-      runApplication(OPTIONS, harness.abortController!.signal),
-    ).rejects.toThrow('You have reached your usage limit.')
-    expect(harness.audioRuns).toBe(1)
-    expect(harness.delayCalls).toEqual([])
-    expect(harness.declineCalls).toBe(1)
-    expect(harness.suspendCalls).toBe(0)
+    await runApplication(OPTIONS, harness.abortController!.signal)
+
+    expect(harness.controllerActivations).toBe(0)
+    expect(harness.controllerAttachments).toBe(1)
   })
 
-  it('stops instead of reconnecting for a deterministic voice configuration error', async () => {
+  it('supports explicit compatibility startup without changing the default', async () => {
+    harness.controllerOutcomes = ['finish']
+
+    await runApplication(
+      { ...OPTIONS, startImmediately: true },
+      harness.abortController!.signal,
+    )
+
+    expect(harness.controllerActivations).toBe(1)
+    expect(harness.controllerAttachments).toBe(1)
+  })
+
+  it('stops for a deterministic voice configuration error', async () => {
     harness.voices = ['alloy']
-    harness.abortOnDelay = true
 
     await expect(
       runApplication(
@@ -217,41 +259,37 @@ describe('application retry supervision', () => {
         harness.abortController!.signal,
       ),
     ).rejects.toThrow('Realtime v3 voice "missing-voice"')
-    expect(harness.audioRuns).toBe(0)
+
+    expect(harness.controllerAttachments).toBe(0)
     expect(harness.delayCalls).toEqual([])
+    expect(harness.usbCloses).toBe(1)
   })
 
-  it('restarts only Realtime with backoff across fast sideband failures', async () => {
-    harness.audioErrors = [
-      new Error('WebSocket protocol error: connection reset'),
-      new Error('WebSocket protocol error: connection reset'),
+  it('reconnects app-server without reopening USB', async () => {
+    harness.controllerOutcomes = [
+      'app-server-disconnect',
+      'app-server-disconnect',
+      'finish',
     ]
 
     await runApplication(OPTIONS, harness.abortController!.signal)
 
-    expect(harness.audioRuns).toBe(3)
-    expect(harness.delayCalls).toEqual([500, 1_000])
+    expect(harness.controllerAttachments).toBe(3)
+    expect(harness.appServerConnects).toBe(3)
     expect(harness.usbConnects).toBe(1)
-    expect(harness.usbCloses).toBe(1)
-  })
-
-  it('increases app-server backoff across repeated fast post-initialization disconnects', async () => {
-    harness.appServerFailures = 2
-
-    await runApplication(OPTIONS, harness.abortController!.signal)
-
-    expect(harness.audioRuns).toBe(3)
     expect(harness.delayCalls).toEqual([500, 1_000])
+    expect(harness.suspendCalls).toBe(2)
+    expect(harness.declineCalls).toBe(1)
   })
 
-  it('reconnects USB only when the device itself disconnects', async () => {
-    harness.deviceFailures = 1
+  it('recreates the conversation controller only when USB disconnects', async () => {
+    harness.controllerOutcomes = ['usb-disconnect', 'finish']
 
     await runApplication(OPTIONS, harness.abortController!.signal)
 
-    expect(harness.audioRuns).toBe(2)
-    expect(harness.delayCalls).toEqual([500])
     expect(harness.usbConnects).toBe(2)
     expect(harness.usbCloses).toBe(2)
+    expect(harness.controllerCloses).toBe(2)
+    expect(harness.delayCalls).toEqual([500])
   })
 })

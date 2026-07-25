@@ -56,6 +56,12 @@ node dist/src/cli.js \
   --port /dev/ttyACM0
 ```
 
+起動後はstandbyで待機します。
+Codex専用MODを導入したStack-chanの頭上を前方へスワイプすると会話を開始し、後方へスワイプすると停止します。
+単純なタッチでは開始しません。
+
+従来どおり起動直後にRealtimeを開始する診断では、`--start-immediately`を追加します。
+
 既存threadを再開します。
 
 ```bash
@@ -73,13 +79,64 @@ node dist/src/cli.js \
   --socket /tmp/stackchan-codex.sock
 ```
 
-`You have reached your usage limit.`が表示された場合、WebRTC接続自体ではなくChatGPT側のVoice利用枠に達しています。このエラーにはapp-serverからリセット時刻が付かないため、ブリッジは再接続ループへ入らず終了コード1で停止します。利用枠が回復してから手動で再実行してください。
+複数のCoreS3を接続する常駐運用では、列挙順の変わるdevice pathではなくUSB serial numberを使います。
+
+```bash
+node dist/src/cli.js \
+  --cwd /absolute/path/to/project \
+  --device-id USB_SERIAL_NUMBER
+```
+
+`--device-id`と`--port`は同時に指定できません。
+指定したIDが見つからなくても、別のCoreS3へ自動接続しません。
+
+`You have reached your usage limit.`が表示された場合、WebRTC接続自体ではなくChatGPT側のVoice利用枠に達しています。
+このエラーにはapp-serverからリセット時刻が付かないため、ブリッジはRealtimeの自動再接続を停止してエラー表示を出します。
+プロセスはstandbyのまま常駐し、利用枠の回復後に次の前方スワイプで明示的に再試行できます。
 
 `stream disconnected before completion`や`Connection reset without closing handshake`が表示された場合は、app-serverからOpenAIへ張られたsideband WebSocketが切断されています。
 ブリッジは受信済み音声を再生してから、CoreS3とのUSB接続を維持したままRealtimeセッションだけを500msから30秒までの指数バックオフで再接続します。
 USB自体が切断された場合に限り、別の指数バックオフでUSBを開き直します。
 各接続が30秒以上安定した後は、対応する次の待機時間を500msへ戻します。
 daemon側の記録は通常`~/.codex/app-server-daemon/app-server.stderr.log`で確認できます。
+
+## 常駐サービス
+
+先にbuildを実行し、`/dev/ttyACM0`へ常駐対象のStack-chanだけを接続します。
+インストーラはこのポートのUSB serial numberを取得し、systemd user unitへ固定します。
+
+```bash
+npm run build
+npm run install:user-service -- \
+  --cwd /absolute/path/to/project \
+  --port /dev/ttyACM0
+```
+
+生成内容だけを確認する場合は`--dry-run`を追加します。
+unitは既存のCodex Desktop管理app-serverへ接続し、音声ブリッジだけをforegroundで常駐させます。
+
+```bash
+systemctl --user status stackchan-codex-voice.service
+journalctl --user -u stackchan-codex-voice.service -f
+```
+
+同名unitがこのインストーラの生成物でない場合は上書きしません。
+インストーラはunitを有効化した後に`is-active`を検査し、起動できないunitを成功として報告しません。
+
+## Firmware MOD
+
+USB音声対応host firmwareをCoreS3へ書き込んだ後、Stack-chan firmwareリポジトリからCodex専用MODを導入します。
+
+```bash
+cd firmware
+npm run mod:m5stackchan_cores3 -- \
+  mods/examples/codex_voice/manifest.json \
+  --port /dev/ttyACM0
+```
+
+現在のfirmware wrapperは、接続中のホストから`xs`パーティションとfirmware versionを検査し、MODをesptoolで直接書き込んでverifyします。
+このMODは既定の`onContextCreated`を置き換えます。
+前方スワイプを開始、後方スワイプを停止へ専有するため、既定の撫で動作とボタン操作は動作しません。
 
 以前に再現した30秒前後の切断は、sideband heartbeat不足ではなく、`werift` 0.24.1のICE consent freshness処理が原因でした。
 ブリッジは依存パッチによって定期STUN要求を維持し、app-serverへheartbeatを送らずに実接続を90秒以上維持します。
@@ -127,4 +184,5 @@ USB wire contractはリポジトリ直下の`docs/SERIAL_NEXT_STEP.md`を参照�
 
 ## 今後の計画
 
-常駐daemon、頭上タッチによる会話開始と終了、聞き取り中表示、表情およびモーションのツール化は[`docs/ROADMAP.md`](docs/ROADMAP.md)にまとめています。
+常駐サービス、頭上スワイプ、状態表示は実装済みです。
+表情およびモーションのツール化は[`docs/ROADMAP.md`](docs/ROADMAP.md)の未実装項目にまとめています。

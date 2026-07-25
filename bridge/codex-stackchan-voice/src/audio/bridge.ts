@@ -35,6 +35,9 @@ export type RealtimeAudioSessionFactory = (
   voice: string | undefined,
 ) => RealtimeAudioSession
 
+export type RealtimeAudioState = 'listening' | 'recognizing' | 'speaking'
+export type RealtimeAudioStateSink = (state: RealtimeAudioState) => Promise<void>
+
 const defaultSessionFactory: RealtimeAudioSessionFactory = (appServer, voice) =>
   new RealtimeWebRtcSession(appServer, voice ? { voice } : {})
 
@@ -44,6 +47,7 @@ export class RealtimeAudioBridge {
   readonly #voice: string | undefined
   readonly #logger: AudioBridgeLogger
   readonly #sessionFactory: RealtimeAudioSessionFactory
+  readonly #stateSink: RealtimeAudioStateSink
   readonly #failure = new Deferred<never>()
   #session: RealtimeAudioSession | undefined
   #running = false
@@ -68,12 +72,14 @@ export class RealtimeAudioBridge {
     voice?: string,
     logger: AudioBridgeLogger = defaultLogger,
     sessionFactory: RealtimeAudioSessionFactory = defaultSessionFactory,
+    stateSink: RealtimeAudioStateSink = (state) => device.setConversationState(state),
   ) {
     this.#appServer = appServer
     this.#device = device
     this.#voice = voice
     this.#logger = logger
     this.#sessionFactory = sessionFactory
+    this.#stateSink = stateSink
   }
 
   async run(signal: AbortSignal): Promise<void> {
@@ -92,7 +98,6 @@ export class RealtimeAudioBridge {
     try {
       await Promise.race([session.start(), abortDeferred.promise, this.#failure.promise])
       this.#logger.info(`Codex realtime WebRTC v3開始: thread=${this.#appServer.threadId}`)
-      await this.#device.setConversationState('idle')
       this.#startMicrophone()
       const deviceClosed = this.#device.closed.then((error) => {
         throw error ?? new Error('CoreS3 USB disconnected')
@@ -148,7 +153,9 @@ export class RealtimeAudioBridge {
   }
 
   async #pumpMicrophone(signal: AbortSignal): Promise<void> {
-    for await (const chunk of this.#device.microphone(signal)) {
+    for await (const chunk of this.#device.microphone(signal, () => {
+      void this.#setState('listening')
+    })) {
       if (chunk.sampleRate !== 16_000 || chunk.channels !== 1 || chunk.format !== 's16le') {
         throw new Error('CoreS3 microphone format changed unexpectedly')
       }
@@ -193,9 +200,9 @@ export class RealtimeAudioBridge {
   #handleRealtimeItem(item: unknown): void {
     if (!isRecord(item) || typeof item.type !== 'string') return
     if (item.type === 'input_audio_buffer.speech_started') {
-      void this.#device.setConversationState('idle').catch((error) => this.#fail(error))
+      void this.#setState('listening')
     } else if (item.type === 'input_audio_buffer.speech_stopped' || item.type === 'input_audio_buffer.committed') {
-      void this.#device.setConversationState('recognizing').catch((error) => this.#fail(error))
+      void this.#setState('recognizing')
     }
   }
 
@@ -275,11 +282,10 @@ export class RealtimeAudioBridge {
       await this.#device.stopMicrophone()
       if (this.#micTask) await this.#micTask.catch(() => undefined)
       await waitForPlaybackReady(ready.promise, controller.signal)
-      await this.#device.setConversationState('speaking')
+      await this.#stateSink('speaking')
       this.#logger.info('CoreS3音声再生開始')
       await this.#device.playAudio(this.#consumePlaybackQueue(queue), controller.signal)
       this.#logger.info('CoreS3音声再生終了')
-      await this.#device.setConversationState('idle')
     })()
       .catch((error) => {
         if (!controller.signal.aborted) this.#fail(error)
@@ -306,7 +312,7 @@ export class RealtimeAudioBridge {
   #handleTranscriptDone(params: Record<string, unknown>): void {
     const role = typeof params.role === 'string' ? params.role : ''
     if (role === 'user') {
-      void this.#device.setConversationState('recognizing').catch((error) => this.#fail(error))
+      void this.#setState('recognizing')
       return
     }
     if (role !== 'assistant') return
@@ -345,6 +351,14 @@ export class RealtimeAudioBridge {
       return
     }
     this.#failure.reject(normalized)
+  }
+
+  async #setState(state: RealtimeAudioState): Promise<void> {
+    try {
+      await this.#stateSink(state)
+    } catch (error) {
+      this.#fail(error)
+    }
   }
 }
 

@@ -5,7 +5,26 @@ export type PcmChunk = {
   format: 's16le'
 }
 
-export type ConversationState = 'idle' | 'recognizing' | 'speaking'
+import type {
+  ConversationRequestEvent,
+  ConversationResultEvent,
+} from './usb/events.js'
+
+export type ConversationState =
+  | 'idle'
+  | 'connecting'
+  | 'listening'
+  | 'recognizing'
+  | 'speaking'
+  | 'error'
+
+export type ConversationSessionState =
+  | 'standby'
+  | 'connecting'
+  | 'listening'
+  | 'recognizing'
+  | 'speaking'
+  | 'blocked'
 
 export type ApprovalKind = 'command' | 'fileChange'
 
@@ -27,6 +46,7 @@ export type DeviceCapabilities = {
   speakerCredit: boolean
   speakerRate24000: boolean
   statusIcon: boolean
+  statusExtended: boolean
   streamId: boolean
   event: boolean
 }
@@ -36,10 +56,12 @@ export interface StackChanDevice {
   readonly closed: Promise<Error | undefined>
 
   connect(signal: AbortSignal): Promise<DeviceCapabilities>
-  microphone(signal: AbortSignal): AsyncIterable<PcmChunk>
+  microphone(signal: AbortSignal, onStarted?: () => void): AsyncIterable<PcmChunk>
   stopMicrophone(): Promise<void>
   playAudio(source: AsyncIterable<PcmChunk>, signal: AbortSignal): Promise<void>
   setConversationState(state: ConversationState): Promise<void>
+  onConversationRequest(listener: (request: ConversationRequestEvent) => void): () => void
+  sendConversationResult(result: ConversationResultEvent): Promise<void>
   requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision>
   notifyApprovalResolved(requestId: string, message?: string): Promise<void>
   notifyApprovalSuspended(requestId: string): Promise<void>

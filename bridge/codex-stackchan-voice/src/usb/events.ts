@@ -1,4 +1,8 @@
-import type { ApprovalDecision, ApprovalRequest } from '../types.js'
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+  ConversationSessionState,
+} from '../types.js'
 
 export const STACKCHAN_EVENT_SCHEMA = 'stackchan.event.v1'
 export const STACKCHAN_APPROVAL_DETAIL_MAX_BYTES = 16 * 1024
@@ -40,12 +44,41 @@ export type ApprovalSuspendedEvent = {
   requestId: string
 }
 
+export type ConversationStartEvent = {
+  schema: typeof STACKCHAN_EVENT_SCHEMA
+  type: 'conversation.start'
+  requestId: string
+  source: 'headTouch'
+  gesture: 'forwardSwipe'
+}
+
+export type ConversationStopEvent = {
+  schema: typeof STACKCHAN_EVENT_SCHEMA
+  type: 'conversation.stop'
+  requestId: string
+  source: 'headTouch'
+  gesture: 'backwardSwipe'
+}
+
+export type ConversationRequestEvent = ConversationStartEvent | ConversationStopEvent
+
+export type ConversationResultEvent = {
+  schema: typeof STACKCHAN_EVENT_SCHEMA
+  type: 'conversation.result'
+  requestId: string
+  success: boolean
+  state: ConversationSessionState
+  error?: string
+}
+
 export type StackChanApplicationEvent =
   | ApprovalRequestEvent
   | ApprovalPresentedEvent
   | ApprovalResponseEvent
   | ApprovalResolvedEvent
   | ApprovalSuspendedEvent
+  | ConversationRequestEvent
+  | ConversationResultEvent
 
 export function approvalRequestEvent(request: ApprovalRequest): ApprovalRequestEvent {
   return {
@@ -57,6 +90,22 @@ export function approvalRequestEvent(request: ApprovalRequest): ApprovalRequestE
     summary: request.summary,
     detail: request.detail,
     truncated: request.truncated,
+  }
+}
+
+export function conversationResultEvent(
+  requestId: string,
+  success: boolean,
+  state: ConversationSessionState,
+  error?: string,
+): ConversationResultEvent {
+  return {
+    schema: STACKCHAN_EVENT_SCHEMA,
+    type: 'conversation.result',
+    requestId,
+    success,
+    state,
+    ...(error === undefined ? {} : { error }),
   }
 }
 
@@ -93,6 +142,21 @@ export function parseStackChanApplicationEvent(serialized: string): StackChanApp
       return value as ApprovalResolvedEvent
     case 'approval.suspended':
       return value as ApprovalSuspendedEvent
+    case 'conversation.start':
+      if (value.source !== 'headTouch' || value.gesture !== 'forwardSwipe') return undefined
+      return value as ConversationStartEvent
+    case 'conversation.stop':
+      if (value.source !== 'headTouch' || value.gesture !== 'backwardSwipe') return undefined
+      return value as ConversationStopEvent
+    case 'conversation.result':
+      if (
+        typeof value.success !== 'boolean' ||
+        !isConversationSessionState(value.state) ||
+        (value.error !== undefined && typeof value.error !== 'string')
+      ) {
+        return undefined
+      }
+      return value as ConversationResultEvent
     default:
       return undefined
   }
@@ -111,6 +175,17 @@ export function truncateUtf8(value: string, maxBytes = STACKCHAN_APPROVAL_DETAIL
     value: new TextDecoder().decode(bytes.slice(0, end)),
     truncated: true,
   }
+}
+
+function isConversationSessionState(value: unknown): value is ConversationSessionState {
+  return (
+    value === 'standby' ||
+    value === 'connecting' ||
+    value === 'listening' ||
+    value === 'recognizing' ||
+    value === 'speaking' ||
+    value === 'blocked'
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
