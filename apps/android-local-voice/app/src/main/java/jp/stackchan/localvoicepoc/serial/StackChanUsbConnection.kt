@@ -267,7 +267,7 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
                         return@runIfCurrent
                     }
                     if (result.first !in 640..StackChanFrameCodec.MAX_PAYLOAD_BYTES ||
-                        result.second and StackChanCapabilities.REQUIRED != StackChanCapabilities.REQUIRED
+                        !hasRequiredStackChanCapabilities(result.second)
                     ) {
                         scope.launch {
                             closePort(

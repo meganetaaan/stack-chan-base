@@ -1,6 +1,11 @@
 {
   "schema": "stackchan.application-event.vectors.v1",
   "applicationSchema": "stackchan.event.v1",
+  "conversationRequestRetry": {
+    "intervalMilliseconds": 2000,
+    "timeoutMilliseconds": 10000,
+    "minimumResultRetentionMilliseconds": 10000
+  },
   "vectors": [
     {
       "name": "conversation-start",

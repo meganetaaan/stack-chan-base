@@ -18,6 +18,11 @@ type ApplicationEventVector = {
 type ApplicationEventFixture = {
   schema: string
   applicationSchema: string
+  conversationRequestRetry: {
+    intervalMilliseconds: number
+    timeoutMilliseconds: number
+    minimumResultRetentionMilliseconds: number
+  }
   vectors: ApplicationEventVector[]
 }
 
@@ -27,6 +32,12 @@ const applicationEventFixture =
 test('shared application event vectors match the Codex parser', () => {
   assert.equal(applicationEventFixture.schema, 'stackchan.application-event.vectors.v1')
   assert.equal(applicationEventFixture.applicationSchema, STACKCHAN_EVENT_SCHEMA)
+  assert.equal(applicationEventFixture.conversationRequestRetry.intervalMilliseconds, 2_000)
+  assert.equal(applicationEventFixture.conversationRequestRetry.timeoutMilliseconds, 10_000)
+  assert.ok(
+    applicationEventFixture.conversationRequestRetry.minimumResultRetentionMilliseconds >=
+      applicationEventFixture.conversationRequestRetry.timeoutMilliseconds,
+  )
   for (const vector of applicationEventFixture.vectors) {
     assert.equal(
       parseStackChanApplicationEvent(JSON.stringify(vector.value)) !== undefined,

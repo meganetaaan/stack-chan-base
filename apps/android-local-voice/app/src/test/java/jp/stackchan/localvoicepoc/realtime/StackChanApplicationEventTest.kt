@@ -5,6 +5,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,6 +24,13 @@ class StackChanApplicationEventTest {
     fun matchesEverySharedApplicationEventRoute() {
         assertEquals("stackchan.application-event.vectors.v1", fixture.getValue("schema").jsonPrimitive.content)
         assertEquals(STACKCHAN_EVENT_SCHEMA, fixture.getValue("applicationSchema").jsonPrimitive.content)
+        val retry = fixture.getValue("conversationRequestRetry").jsonObject
+        assertEquals(2_000L, retry.getValue("intervalMilliseconds").jsonPrimitive.long)
+        assertEquals(10_000L, retry.getValue("timeoutMilliseconds").jsonPrimitive.long)
+        assertEquals(
+            CONVERSATION_RESULT_RETENTION_MS,
+            retry.getValue("minimumResultRetentionMilliseconds").jsonPrimitive.long,
+        )
 
         fixture.getValue("vectors").jsonArray.forEach { element ->
             val vector = element.jsonObject

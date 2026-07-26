@@ -25,6 +25,28 @@
       "payloadHex": "001000007f0f0000"
     }
   ],
+  "connectionPolicy": [
+    {
+      "dock": "android",
+      "firmwareAdvertisesEvent": false,
+      "connectionAllowed": true
+    },
+    {
+      "dock": "android",
+      "firmwareAdvertisesEvent": true,
+      "connectionAllowed": true
+    },
+    {
+      "dock": "codex",
+      "firmwareAdvertisesEvent": false,
+      "connectionAllowed": false
+    },
+    {
+      "dock": "codex",
+      "firmwareAdvertisesEvent": true,
+      "connectionAllowed": true
+    }
+  ],
   "eventNegotiation": [
     {
       "dockAdvertisesEvent": false,

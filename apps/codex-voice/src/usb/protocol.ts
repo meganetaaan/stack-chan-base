@@ -68,6 +68,10 @@ export const STACKCHAN_REQUIRED_CAPABILITIES =
   StackChanCapability.STREAM_ID |
   StackChanCapability.EVENT
 
+export function hasRequiredStackChanCapabilities(capabilities: number): boolean {
+  return (capabilities & STACKCHAN_REQUIRED_CAPABILITIES) === STACKCHAN_REQUIRED_CAPABILITIES
+}
+
 export const StackChanEventFlag = {
   START: 1,
   END: 1 << 1,

@@ -10,6 +10,7 @@ import jp.stackchan.localvoicepoc.piper.PiperInstallation
 import jp.stackchan.localvoicepoc.piper.SpeechSynthesizer
 import jp.stackchan.localvoicepoc.speech.LocalSpeechRecognizer
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -62,6 +63,7 @@ class ConversationEngineTest {
         engine.stop()
         collector.cancel()
         engine.close()
+        withTimeout(TEST_TIMEOUT_MS) { engine.awaitClosed() }
     }
 
     @Test
@@ -90,6 +92,7 @@ class ConversationEngineTest {
         engine.stop()
         collector.cancel()
         engine.close()
+        withTimeout(TEST_TIMEOUT_MS) { engine.awaitClosed() }
     }
 
     @Test
@@ -111,6 +114,7 @@ class ConversationEngineTest {
         assertTrue(error.message.orEmpty().contains("Push-to-talk"))
         engine.stop()
         engine.close()
+        withTimeout(TEST_TIMEOUT_MS) { engine.awaitClosed() }
     }
 
     @Test
@@ -139,6 +143,7 @@ class ConversationEngineTest {
         assertTrue("partial playback must be aborted", "abort" in sink.events)
         assertFalse("failed generation must not finish playback", "finish" in sink.events)
         engine.close()
+        withTimeout(TEST_TIMEOUT_MS) { engine.awaitClosed() }
     }
 
     @Test
@@ -171,6 +176,31 @@ class ConversationEngineTest {
         assertFalse("no new Piper sentence may start after stop begins", secondSynthesisStarted)
         assertEquals(1, synthesizer.calls.get())
         engine.close()
+        withTimeout(TEST_TIMEOUT_MS) { engine.awaitClosed() }
+    }
+
+    @Test
+    fun closeReturnsWithoutWaitingForSlowModelCancellation() = runBlocking {
+        val languageModel = BlockingCancelLanguageModel()
+        val engine = ConversationEngine(
+            audioSource = EmptyAudioSource,
+            audioSink = RecordingSink(),
+            synthesizer = OneChunkSynthesizer,
+            speechRecognizer = UnusedRecognizer,
+            languageModel = languageModel,
+        )
+
+        val closeCall = async(Dispatchers.Default) { engine.close() }
+        withTimeout(TEST_TIMEOUT_MS) { languageModel.cancelEntered.await() }
+        val returnedBeforeCancellationFinished = withTimeoutOrNull(200) {
+            closeCall.await()
+            true
+        } ?: false
+        languageModel.allowCancellationToFinish.complete(Unit)
+        withTimeout(TEST_TIMEOUT_MS) { engine.awaitClosed() }
+
+        assertTrue("close() must not block its caller on model teardown", returnedBeforeCancellationFinished)
+        assertTrue(languageModel.closed.isCompleted)
     }
 
     private class RecordingSink : PcmAudioSink {
@@ -238,6 +268,31 @@ class ConversationEngineTest {
         override suspend fun cancel() = Unit
 
         override fun close() = Unit
+    }
+
+    private class BlockingCancelLanguageModel : LocalLanguageModel {
+        override val isLoaded = true
+        override val backend = LanguageModelBackend.CPU
+        val cancelEntered = CompletableDeferred<Unit>()
+        val allowCancellationToFinish = CompletableDeferred<Unit>()
+        val closed = CompletableDeferred<Unit>()
+
+        override suspend fun prepare(
+            modelSpec: jp.stackchan.localvoicepoc.model.LanguageModelSpec,
+            modelFile: File,
+            preference: LanguageModelBackendPreference,
+        ): LanguageModelBackend = backend
+
+        override fun generate(request: GenerationRequest): Flow<String> = emptyFlow()
+
+        override suspend fun cancel() {
+            cancelEntered.complete(Unit)
+            allowCancellationToFinish.await()
+        }
+
+        override fun close() {
+            closed.complete(Unit)
+        }
     }
 
     private object OneChunkSynthesizer : SpeechSynthesizer {

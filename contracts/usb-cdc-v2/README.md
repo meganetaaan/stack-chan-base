@@ -158,7 +158,7 @@ dock appは次の形で結果を返す。
 
 Firmwareは結果を受信するまで、同じeventを同じ`requestId`で2秒ごとに再送する。
 再送は10秒で停止し、画面をエラー状態へ移す。
-dock appは直近64件の結果を保持し、同じ`requestId`の再送で会話を二重に開始または停止しない。
+dock appは各`requestId`の結果を少なくとも最初の処理から10秒間保持し、同じ`requestId`の再送で会話を二重に開始または停止しない。
 異なる論理操作に同じ`requestId`を再利用しない。
 
 `approval.request`の詳細本文は16 KiBまでとし、切り詰めた場合は`truncated=true`を設定する。

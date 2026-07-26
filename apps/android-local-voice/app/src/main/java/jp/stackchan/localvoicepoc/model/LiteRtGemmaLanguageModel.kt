@@ -30,6 +30,44 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+internal class GenerationLifecycle<T> {
+    internal class Generation<T> {
+        private val cancellationRequested = AtomicBoolean(false)
+        private val operation = AtomicReference<T?>(null)
+
+        val isCancellationRequested: Boolean get() = cancellationRequested.get()
+
+        fun attach(operation: T) {
+            this.operation.set(operation)
+        }
+
+        fun requestCancellation(): T? {
+            cancellationRequested.set(true)
+            return operation.get()
+        }
+
+        fun detach() {
+            operation.set(null)
+        }
+    }
+
+    private val active = AtomicReference<Generation<T>?>(null)
+
+    fun begin(): Generation<T> {
+        val generation = Generation<T>()
+        check(active.compareAndSet(null, generation)) { "A generation is already active" }
+        return generation
+    }
+
+    fun requestCancellation(): T? = active.get()?.requestCancellation()
+
+    fun finish(generation: Generation<T>) {
+        generation.detach()
+        check(active.compareAndSet(generation, null)) { "Generation lifecycle mismatch" }
+    }
+}
 
 /** Gemma 4 adapter implemented against the public LiteRT-LM API. */
 @OptIn(ExperimentalApi::class)
@@ -41,15 +79,10 @@ class LiteRtGemmaLanguageModel(
     private val operationMutex = Mutex()
     private val cleanupScope = CoroutineScope(SupervisorJob() + inferenceDispatcher)
     private val closed = AtomicBoolean(false)
+    private val generationLifecycle = GenerationLifecycle<Conversation>()
 
     @Volatile
     private var activeEngine: Engine? = null
-
-    @Volatile
-    private var generatingConversation: Conversation? = null
-
-    @Volatile
-    private var cancelRequested = false
 
     private var sessionHistory: List<DialogueMessage> = emptyList()
     private var sessionSystemInstruction: String? = null
@@ -129,53 +162,62 @@ class LiteRtGemmaLanguageModel(
         }
 
     override fun generate(request: GenerationRequest): Flow<String> = flow {
-        operationMutex.withLock {
-            check(!closed.get()) { "Gemma 4は終了済みです" }
-            val engine = checkNotNull(activeEngine) { "Gemma 4がロードされていません" }
-            check(engine.isInitialized()) { "LiteRT-LMエンジンが初期化されていません" }
+        val generation = generationLifecycle.begin()
+        try {
+            operationMutex.withLock {
+                check(!closed.get()) { "Gemma 4は終了済みです" }
+                val engine = checkNotNull(activeEngine) { "Gemma 4がロードされていません" }
+                check(engine.isInitialized()) { "LiteRT-LMエンジンが初期化されていません" }
+                if (generation.isCancellationRequested) {
+                    throw CancellationException("Gemma 4の生成を中断しました")
+                }
 
-            val conversation = conversationFor(engine, request)
-            cancelRequested = false
-            generatingConversation = conversation
-            val generated = StringBuilder()
-            var succeeded = false
-            try {
-                if (cancelRequested) throw CancellationException("Gemma 4の生成を中断しました")
-                streamMessages(conversation, request.userText).collect { message ->
-                    val delta = message.contents.contents
-                        .filterIsInstance<Content.Text>()
-                        .joinToString(separator = "") { it.text }
-                    if (delta.isNotEmpty()) {
-                        generated.append(delta)
-                        emit(delta)
+                val conversation = conversationFor(engine, request)
+                generation.attach(conversation)
+                val generated = StringBuilder()
+                var succeeded = false
+                try {
+                    if (closed.get() || generation.isCancellationRequested) {
+                        runCatching { conversation.cancelProcess() }
+                        throw CancellationException("Gemma 4の生成を中断しました")
+                    }
+                    streamMessages(conversation, request.userText).collect { message ->
+                        val delta = message.contents.contents
+                            .filterIsInstance<Content.Text>()
+                            .joinToString(separator = "") { it.text }
+                        if (delta.isNotEmpty()) {
+                            generated.append(delta)
+                            emit(delta)
+                        }
+                    }
+                    if (generation.isCancellationRequested) {
+                        throw CancellationException("Gemma 4の生成を中断しました")
+                    }
+                    check(generated.isNotBlank()) { "Gemma 4が空の応答を返しました" }
+                    sessionHistory = request.history +
+                        DialogueMessage(DialogueMessage.Role.USER, request.userText) +
+                        DialogueMessage(DialogueMessage.Role.ASSISTANT, generated.toString())
+                    succeeded = true
+                } finally {
+                    if (!succeeded) {
+                        runCatching { conversation.cancelProcess() }
+                        closeConversation()
                     }
                 }
-                if (cancelRequested) throw CancellationException("Gemma 4の生成を中断しました")
-                check(generated.isNotBlank()) { "Gemma 4が空の応答を返しました" }
-                sessionHistory = request.history +
-                    DialogueMessage(DialogueMessage.Role.USER, request.userText) +
-                    DialogueMessage(DialogueMessage.Role.ASSISTANT, generated.toString())
-                succeeded = true
-            } finally {
-                generatingConversation = null
-                if (!succeeded) {
-                    runCatching { conversation.cancelProcess() }
-                    closeConversation()
-                }
             }
+        } finally {
+            generationLifecycle.finish(generation)
         }
     }.flowOn(inferenceDispatcher)
 
     override suspend fun cancel() {
-        cancelRequested = true
-        runCatching { generatingConversation?.cancelProcess() }
+        runCatching { generationLifecycle.requestCancellation()?.cancelProcess() }
             .onFailure { Log.w(TAG, "LiteRT-LM cancellation failed", it) }
         operationMutex.withLock { }
     }
 
     override suspend fun shutdown() {
-        cancelRequested = true
-        runCatching { generatingConversation?.cancelProcess() }
+        runCatching { generationLifecycle.requestCancellation()?.cancelProcess() }
         operationMutex.withLock {
             closeConversation()
             closeEngine()
@@ -185,8 +227,7 @@ class LiteRtGemmaLanguageModel(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        cancelRequested = true
-        runCatching { generatingConversation?.cancelProcess() }
+        runCatching { generationLifecycle.requestCancellation()?.cancelProcess() }
         cleanupScope.launch {
             operationMutex.withLock {
                 closeConversation()
@@ -294,7 +335,6 @@ class LiteRtGemmaLanguageModel(
     private fun closeConversation() {
         val conversation = retainedConversation
         retainedConversation = null
-        generatingConversation = null
         sessionHistory = emptyList()
         sessionSystemInstruction = null
         sessionSampling = null

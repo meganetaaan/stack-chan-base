@@ -27,6 +27,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicLong
 
 class RealtimeSessionControllerTest {
     @Test
@@ -208,10 +209,16 @@ class RealtimeSessionControllerTest {
     }
 
     @Test
-    fun boundsTheConversationResultCacheAtSixtyFourEntries() = runBlocking {
+    fun retainsEveryConversationResultThroughTheFirmwareRetryWindow() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL)
         val commands = FakeConversationCommands()
-        val controller = controller(transport, commands, this)
+        val nowMilliseconds = AtomicLong(0)
+        val controller = controller(
+            transport = transport,
+            commands = commands,
+            scope = this,
+            monotonicTimeMilliseconds = nowMilliseconds::get,
+        )
         controller.start()
         await { transport.payloads().any { it.type() == "session.created" } }
         transport.clearSent()
@@ -219,8 +226,17 @@ class RealtimeSessionControllerTest {
         repeat(65) { index -> transport.receive(startRequest("request-$index")) }
         await { commands.startCalls == 65 }
         transport.receive(startRequest("request-0"))
-        await { commands.startCalls == 66 }
+        await { transport.conversationResults().size == 66 }
+        assertEquals(65, commands.startCalls)
 
+        nowMilliseconds.set(CONVERSATION_RESULT_RETENTION_MS)
+        transport.receive(startRequest("request-0"))
+        await { transport.conversationResults().size == 67 }
+        assertEquals(65, commands.startCalls)
+
+        nowMilliseconds.incrementAndGet()
+        transport.receive(startRequest("request-0"))
+        await { commands.startCalls == 66 }
         assertEquals(66, commands.startCalls)
         controller.close()
     }
@@ -230,12 +246,14 @@ class RealtimeSessionControllerTest {
         commands: ConversationCommandHandler,
         scope: kotlinx.coroutines.CoroutineScope,
         registry: RemoteToolRegistry = FakeRegistry(),
+        monotonicTimeMilliseconds: () -> Long = { System.nanoTime() / 1_000_000L },
     ) = RealtimeSessionController(
         transport = transport,
         registry = registry,
         mcp = FakeMcp(),
         conversationCommands = commands,
         scope = scope,
+        monotonicTimeMilliseconds = monotonicTimeMilliseconds,
     )
 
     private suspend fun await(condition: () -> Boolean) {

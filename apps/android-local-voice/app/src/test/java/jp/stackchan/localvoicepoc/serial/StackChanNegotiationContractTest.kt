@@ -30,6 +30,7 @@ class StackChanNegotiationContractTest {
         assertEquals(StackChanCapabilities.EVENT, bits.getValue("event").jsonPrimitive.int)
         assertEquals(StackChanCapabilities.STATUS_EXTENDED, bits.getValue("statusExtended").jsonPrimitive.int)
 
+        var matchedDefaultVector = false
         fixture.getValue("helloPayloads").jsonArray.forEach { element ->
             val vector = element.jsonObject
             val expected = vector.string("payloadHex").hexToBytes()
@@ -42,9 +43,35 @@ class StackChanNegotiationContractTest {
                 ),
             )
             if (vector.string("name") == "android-dock-all") {
+                matchedDefaultVector = true
                 assertEquals(StackChanCapabilities.ALL, vector.getValue("capabilities").jsonPrimitive.int)
                 assertArrayEquals(expected, helloPayload())
             }
+        }
+        assertTrue(
+            "expected an 'android-dock-all' vector to verify helloPayload() defaults",
+            matchedDefaultVector,
+        )
+    }
+
+    @Test
+    fun sharedConnectionPolicyKeepsEventOptionalForAndroid() {
+        val cases = fixture.getValue("connectionPolicy").jsonArray.map { it.jsonObject }
+        assertEquals(
+            setOf("android" to false, "android" to true, "codex" to false, "codex" to true),
+            cases.mapTo(mutableSetOf()) {
+                it.string("dock") to it.boolean("firmwareAdvertisesEvent")
+            },
+        )
+
+        cases.filter { it.string("dock") == "android" }.forEach { vector ->
+            val eventCapability =
+                if (vector.boolean("firmwareAdvertisesEvent")) StackChanCapabilities.EVENT else 0
+            val firmwareCapabilities = StackChanCapabilities.REQUIRED or eventCapability
+            assertEquals(
+                vector.boolean("connectionAllowed"),
+                hasRequiredStackChanCapabilities(firmwareCapabilities),
+            )
         }
     }
 

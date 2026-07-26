@@ -157,12 +157,24 @@ test('USB codec matches the shared contract frame vectors', () => {
 })
 
 test('USB parser rejects shared corrupt vectors and resynchronizes', () => {
-  const invalid = contractVectors.invalidFrames[0]
+  for (const invalid of contractVectors.invalidFrames) {
+    switch (invalid.reason) {
+      case 'crc_mismatch':
+        assert.throws(
+          () => decodeStackChanFrame(fromHex(invalid.encodedHex)),
+          /CRC mismatch/,
+          invalid.name,
+        )
+        break
+      default:
+        assert.fail(`unsupported invalid frame reason: ${invalid.reason}`)
+    }
+  }
+
+  const invalid = contractVectors.invalidFrames.find((vector) => vector.reason === 'crc_mismatch')
   const valid = contractVectors.validFrames[0]
   assert.ok(invalid)
   assert.ok(valid)
-  assert.equal(invalid.reason, 'crc_mismatch')
-  assert.throws(() => decodeStackChanFrame(fromHex(invalid.encodedHex)), /CRC mismatch/)
 
   const corrupt = fromHex(invalid.encodedHex)
   const expected = fromHex(valid.encodedHex)

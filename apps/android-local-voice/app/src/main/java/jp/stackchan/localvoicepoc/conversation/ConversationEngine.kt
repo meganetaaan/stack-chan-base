@@ -13,6 +13,7 @@ import jp.stackchan.localvoicepoc.piper.SpeechSynthesizer
 import jp.stackchan.localvoicepoc.speech.LocalSpeechRecognizer
 import jp.stackchan.localvoicepoc.util.Pcm
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,10 +31,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ConversationEngine(
     private val audioSource: PcmAudioSource,
@@ -45,6 +46,9 @@ class ConversationEngine(
     private val endpointDetectorFactory: () -> SpeechEndpointDetector = { EndpointDetector() },
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val closeRequested = AtomicBoolean(false)
+    private val closeCompleted = CompletableDeferred<Unit>()
     private val detector = lazy(endpointDetectorFactory)
     private val mutableEvents = MutableSharedFlow<ConversationEvent>(extraBufferCapacity = 64)
     private val history = ArrayDeque<Pair<String, String>>()
@@ -56,6 +60,7 @@ class ConversationEngine(
     @Volatile private var pushToTalkBuffer: ByteArrayOutputStream? = null
 
     fun startAutomatic() {
+        check(!closeRequested.get()) { "ConversationEngineは終了済みです" }
         check(sessionJob?.isActive != true) { "A conversation session is already running" }
         check(pushToTalkJob?.isActive != true) { "Push-to-talk recording is already running" }
         check(synthesizer.isLoaded) { "Piper Plus is not loaded" }
@@ -78,14 +83,15 @@ class ConversationEngine(
                 audioSource.stop()
                 withContext(NonCancellable) {
                     audioSink.abort()
-                    sessionJob = null
                     emitPhase(ConversationPhase.IDLE)
                 }
+                sessionJob = null
             }
         }
     }
 
     fun startPushToTalk() {
+        check(!closeRequested.get()) { "ConversationEngineは終了済みです" }
         check(sessionJob?.isActive != true) { "Automatic conversation is running" }
         check(pushToTalkJob?.isActive != true) { "Push-to-talk recording is already running" }
         check(synthesizer.isLoaded) { "Piper Plus is not loaded" }
@@ -122,6 +128,7 @@ class ConversationEngine(
     }
 
     fun stopPushToTalkAndProcess() {
+        check(!closeRequested.get()) { "ConversationEngineは終了済みです" }
         val recordingJob = pushToTalkJob ?: return
         audioSource.stop()
 
@@ -159,10 +166,10 @@ class ConversationEngine(
         audioSink.abort()
         activePushToTalk?.join()
         activeSession?.join()
+        emitPhase(ConversationPhase.IDLE)
         pushToTalkJob = null
         sessionJob = null
         pushToTalkBuffer = null
-        emitPhase(ConversationPhase.IDLE)
     }
 
     private suspend fun captureAutomaticUtterance(): ByteArray {
@@ -330,14 +337,35 @@ class ConversationEngine(
     }
 
     override fun close() {
-        runBlocking { stop() }
-        if (detector.isInitialized()) detector.value.close()
-        speechRecognizer.close()
-        languageModel.close()
-        synthesizer.close()
-        audioSink.stop()
-        scope.cancel()
+        if (!closeRequested.compareAndSet(false, true)) return
+        cleanupScope.launch {
+            try {
+                try {
+                    stop()
+                } catch (error: Throwable) {
+                    Log.w(TAG, "ConversationEngine stop failed during close", error)
+                }
+                if (detector.isInitialized()) {
+                    runCatching { detector.value.close() }
+                        .onFailure { Log.w(TAG, "Endpoint detector close failed", it) }
+                }
+                runCatching { speechRecognizer.close() }
+                    .onFailure { Log.w(TAG, "Speech recognizer close failed", it) }
+                runCatching { languageModel.close() }
+                    .onFailure { Log.w(TAG, "Language model close failed", it) }
+                runCatching { synthesizer.close() }
+                    .onFailure { Log.w(TAG, "Speech synthesizer close failed", it) }
+                runCatching { audioSink.stop() }
+                    .onFailure { Log.w(TAG, "Audio sink close failed", it) }
+            } finally {
+                scope.cancel()
+                closeCompleted.complete(Unit)
+                cleanupScope.cancel()
+            }
+        }
     }
+
+    internal suspend fun awaitClosed() = closeCompleted.await()
 
     private companion object {
         const val TAG = "ConversationEngine"

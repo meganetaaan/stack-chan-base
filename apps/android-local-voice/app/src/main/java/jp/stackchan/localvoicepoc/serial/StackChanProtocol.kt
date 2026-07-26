@@ -59,6 +59,9 @@ object StackChanCapabilities {
 
 fun Int.hasStackChanCapability(capability: Int): Boolean = this and capability != 0
 
+fun hasRequiredStackChanCapabilities(capabilities: Int): Boolean =
+    capabilities and StackChanCapabilities.REQUIRED == StackChanCapabilities.REQUIRED
+
 fun canUseBidirectionalStackChanEvents(localCapabilities: Int, peerCapabilities: Int): Boolean =
     localCapabilities.hasStackChanCapability(StackChanCapabilities.EVENT) &&
         peerCapabilities.hasStackChanCapability(StackChanCapabilities.EVENT)

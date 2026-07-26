@@ -19,6 +19,7 @@ import {
 } from './events.js'
 import {
   encodeStackChanFrame,
+  hasRequiredStackChanCapabilities,
   helloPayload,
   parseHelloPayload,
   parseUint32Payload,
@@ -170,8 +171,8 @@ export class UsbStackChanDevice implements StackChanDevice {
       if (peer.maxPayload < SPEAKER_FRAME_BYTES_24KHZ) {
         throw new Error(`CoreS3 max payload ${peer.maxPayload} is smaller than the required 3840 bytes`)
       }
-      const missing = STACKCHAN_REQUIRED_CAPABILITIES & ~peer.capabilities
-      if (missing !== 0) {
+      if (!hasRequiredStackChanCapabilities(peer.capabilities)) {
+        const missing = STACKCHAN_REQUIRED_CAPABILITIES & ~peer.capabilities
         throw new Error(`CoreS3 is missing required USB capabilities: 0x${missing.toString(16)}`)
       }
       this.#maxPayload = Math.min(STACKCHAN_MAX_PAYLOAD_BYTES, peer.maxPayload)

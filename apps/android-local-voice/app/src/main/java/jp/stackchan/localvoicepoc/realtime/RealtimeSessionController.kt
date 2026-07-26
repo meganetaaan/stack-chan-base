@@ -32,6 +32,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.UUID
 
+internal const val CONVERSATION_RESULT_RETENTION_MS = 10_000L
+
 data class McpServerRequest(
     val serverLabel: String,
     val connectorId: String?,
@@ -53,14 +55,17 @@ class RealtimeSessionController(
     private val mcp: McpToolProvider,
     private val conversationCommands: ConversationCommandHandler,
     private val scope: CoroutineScope,
+    private val monotonicTimeMilliseconds: () -> Long = { System.nanoTime() / 1_000_000L },
 ) : AutoCloseable {
     private data class CachedConversationResult(
         val operation: ConversationOperation,
         val result: ConversationCommandResult,
+        val retainedUntilMilliseconds: Long,
     )
 
     private val encoder = StackChanEventEncoder()
     private val decoder = StackChanEventDecoder()
+    private val decoderLock = Any()
     private val pendingFunctionsLock = Any()
     private val pendingFunctions = mutableMapOf<String, CompletableDeferred<String>>()
     private val conversationResults = LinkedHashMap<String, CachedConversationResult>()
@@ -113,7 +118,7 @@ class RealtimeSessionController(
         val ready = transport.state.value as? StackChanUsbState.Ready ?: return
         if (!ready.capabilities.hasStackChanCapability(StackChanCapabilities.EVENT)) return
         try {
-            decoder.push(frame)?.let { payload ->
+            synchronized(decoderLock) { decoder.push(frame) }?.let { payload ->
                 when (val routed = StackChanApplicationEventCodec.route(payload)) {
                     is RoutedStackChanEvent.RawRealtime -> handleRealtimeEvent(routed.value)
                     is RoutedStackChanEvent.Conversation -> handleConversationRequest(routed.request)
@@ -142,7 +147,7 @@ class RealtimeSessionController(
     }
 
     private suspend fun handleConversationRequest(request: ConversationRequest) {
-        val cached = conversationResults[request.requestId]
+        val cached = cachedConversationResult(request.requestId)
         val result = when {
             cached == null -> executeConversationRequest(request).also {
                 rememberConversationResult(request, it)
@@ -172,10 +177,31 @@ class RealtimeSessionController(
         )
     }
 
+    private fun cachedConversationResult(requestId: String): CachedConversationResult? =
+        synchronized(pendingFunctionsLock) {
+            removeExpiredConversationResults(monotonicTimeMilliseconds())
+            conversationResults[requestId]
+        }
+
     private fun rememberConversationResult(request: ConversationRequest, result: ConversationCommandResult) {
-        conversationResults[request.requestId] = CachedConversationResult(request.operation, result)
-        while (conversationResults.size > CONVERSATION_RESULT_CACHE_SIZE) {
-            conversationResults.remove(conversationResults.keys.first())
+        synchronized(pendingFunctionsLock) {
+            if (controllerClosed) return
+            val now = monotonicTimeMilliseconds()
+            removeExpiredConversationResults(now)
+            conversationResults[request.requestId] = CachedConversationResult(
+                operation = request.operation,
+                result = result,
+                retainedUntilMilliseconds = now + CONVERSATION_RESULT_RETENTION_MS,
+            )
+        }
+    }
+
+    private fun removeExpiredConversationResults(nowMilliseconds: Long) {
+        val iterator = conversationResults.entries.iterator()
+        while (iterator.hasNext()) {
+            if (iterator.next().value.retainedUntilMilliseconds < nowMilliseconds) {
+                iterator.remove()
+            }
         }
     }
 
@@ -360,6 +386,7 @@ class RealtimeSessionController(
     )
 
     private suspend fun send(value: JsonObject) {
+        if (synchronized(pendingFunctionsLock) { controllerClosed }) return
         val ready = transport.state.value as? StackChanUsbState.Ready ?: return
         if (!ready.capabilities.hasStackChanCapability(StackChanCapabilities.EVENT)) return
         withContext(Dispatchers.IO) {
@@ -379,11 +406,14 @@ class RealtimeSessionController(
     private fun resetSession(reason: String, closing: Boolean = false) {
         val functionsToFail = synchronized(pendingFunctionsLock) {
             remoteFunctionsAvailable = false
-            if (closing) controllerClosed = true
+            if (closing) {
+                controllerClosed = true
+                conversationResults.clear()
+            }
             pendingFunctions.values.toList().also { pendingFunctions.clear() }
         }
         functionsToFail.forEach { it.completeExceptionally(IllegalStateException(reason)) }
-        decoder.reset()
+        synchronized(decoderLock) { decoder.reset() }
         instructionOverlay = ""
         remoteDefinitions = emptyList()
         registry.clearRemoteTools()
@@ -394,7 +424,6 @@ class RealtimeSessionController(
         eventJob?.cancel()
         stateJob?.cancel()
         resetSession("セッションを終了しました", closing = true)
-        conversationResults.clear()
     }
 
     private fun JsonObject.string(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull
@@ -406,6 +435,5 @@ class RealtimeSessionController(
 
     private companion object {
         const val FUNCTION_TIMEOUT_MS = 30_000L
-        const val CONVERSATION_RESULT_CACHE_SIZE = 64
     }
 }

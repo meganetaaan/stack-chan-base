@@ -53,13 +53,22 @@ class StackChanContractVectorTest {
 
     @Test
     fun rejectsSharedInvalidFramesAndResynchronizes() {
-        val invalid = vectors.getValue("invalidFrames").jsonArray.first().jsonObject
-        assertEquals("crc_mismatch", invalid.getValue("reason").jsonPrimitive.content)
-        val invalidBytes = invalid.getValue("encodedHex").jsonPrimitive.content.hexToBytes()
-        assertThrows(IllegalArgumentException::class.java) {
-            StackChanFrameCodec.decode(invalidBytes)
+        val invalidVectors = vectors.getValue("invalidFrames").jsonArray.map { it.jsonObject }
+        invalidVectors.forEach { invalid ->
+            val reason = invalid.getValue("reason").jsonPrimitive.content
+            val invalidBytes = invalid.getValue("encodedHex").jsonPrimitive.content.hexToBytes()
+            when (reason) {
+                "crc_mismatch" -> assertThrows(IllegalArgumentException::class.java) {
+                    StackChanFrameCodec.decode(invalidBytes)
+                }
+                else -> throw AssertionError("Unsupported invalid frame reason: $reason")
+            }
         }
 
+        val invalid = invalidVectors.single {
+            it.getValue("reason").jsonPrimitive.content == "crc_mismatch"
+        }
+        val invalidBytes = invalid.getValue("encodedHex").jsonPrimitive.content.hexToBytes()
         val valid = vectors.getValue("validFrames").jsonArray.first().jsonObject
         val validBytes = valid.getValue("encodedHex").jsonPrimitive.content.hexToBytes()
         val decoded = StackChanFrameStreamParser().push(invalidBytes + validBytes)
