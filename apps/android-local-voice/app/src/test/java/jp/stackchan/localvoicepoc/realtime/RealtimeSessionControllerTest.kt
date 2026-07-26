@@ -11,6 +11,7 @@ import jp.stackchan.localvoicepoc.serial.StackChanEventEncoder
 import jp.stackchan.localvoicepoc.serial.StackChanFrame
 import jp.stackchan.localvoicepoc.serial.StackChanUsbState
 import jp.stackchan.localvoicepoc.serial.StackChanUsbTransport
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -123,13 +124,14 @@ class RealtimeSessionControllerTest {
     @Test
     fun aFailedSessionAnnouncementDoesNotStopReconnectObservation() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL)
-        val controller = controller(transport, FakeConversationCommands(), this)
+        val registry = FakeRegistry()
+        val controller = controller(transport, FakeConversationCommands(), this, registry)
         transport.failNextWrites = 1
         controller.start()
-        delay(20)
+        withTimeout(500) { transport.failedWriteAttempted.await() }
 
         transport.changeState(StackChanUsbState.Disconnected)
-        yield()
+        await { registry.clearCalls > 0 }
         transport.changeState(StackChanUsbState.Ready(4_096, StackChanCapabilities.ALL))
         await { transport.payloads().any { it.type() == "session.created" } }
 
@@ -318,10 +320,12 @@ class RealtimeSessionControllerTest {
         override val state = mutableState
         override val frames = mutableFrames
         var failNextWrites = 0
+        val failedWriteAttempted = CompletableDeferred<Unit>()
 
         override suspend fun send(frame: StackChanFrame) {
             if (failNextWrites > 0) {
                 failNextWrites -= 1
+                failedWriteAttempted.complete(Unit)
                 throw IOException("simulated write failure")
             }
             sent += frame

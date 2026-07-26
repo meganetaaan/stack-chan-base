@@ -163,50 +163,56 @@ class LiteRtGemmaLanguageModel(
 
     override fun generate(request: GenerationRequest): Flow<String> = flow {
         val generation = generationLifecycle.begin()
+        var lifecycleFinished = false
         try {
             operationMutex.withLock {
-                check(!closed.get()) { "Gemma 4は終了済みです" }
-                val engine = checkNotNull(activeEngine) { "Gemma 4がロードされていません" }
-                check(engine.isInitialized()) { "LiteRT-LMエンジンが初期化されていません" }
-                if (generation.isCancellationRequested) {
-                    throw CancellationException("Gemma 4の生成を中断しました")
-                }
-
-                val conversation = conversationFor(engine, request)
-                generation.attach(conversation)
-                val generated = StringBuilder()
-                var succeeded = false
                 try {
-                    if (closed.get() || generation.isCancellationRequested) {
-                        runCatching { conversation.cancelProcess() }
-                        throw CancellationException("Gemma 4の生成を中断しました")
-                    }
-                    streamMessages(conversation, request.userText).collect { message ->
-                        val delta = message.contents.contents
-                            .filterIsInstance<Content.Text>()
-                            .joinToString(separator = "") { it.text }
-                        if (delta.isNotEmpty()) {
-                            generated.append(delta)
-                            emit(delta)
-                        }
-                    }
+                    check(!closed.get()) { "Gemma 4は終了済みです" }
+                    val engine = checkNotNull(activeEngine) { "Gemma 4がロードされていません" }
+                    check(engine.isInitialized()) { "LiteRT-LMエンジンが初期化されていません" }
                     if (generation.isCancellationRequested) {
                         throw CancellationException("Gemma 4の生成を中断しました")
                     }
-                    check(generated.isNotBlank()) { "Gemma 4が空の応答を返しました" }
-                    sessionHistory = request.history +
-                        DialogueMessage(DialogueMessage.Role.USER, request.userText) +
-                        DialogueMessage(DialogueMessage.Role.ASSISTANT, generated.toString())
-                    succeeded = true
-                } finally {
-                    if (!succeeded) {
-                        runCatching { conversation.cancelProcess() }
-                        closeConversation()
+
+                    val conversation = conversationFor(engine, request)
+                    generation.attach(conversation)
+                    val generated = StringBuilder()
+                    var succeeded = false
+                    try {
+                        if (closed.get() || generation.isCancellationRequested) {
+                            runCatching { conversation.cancelProcess() }
+                            throw CancellationException("Gemma 4の生成を中断しました")
+                        }
+                        streamMessages(conversation, request.userText).collect { message ->
+                            val delta = message.contents.contents
+                                .filterIsInstance<Content.Text>()
+                                .joinToString(separator = "") { it.text }
+                            if (delta.isNotEmpty()) {
+                                generated.append(delta)
+                                emit(delta)
+                            }
+                        }
+                        if (generation.isCancellationRequested) {
+                            throw CancellationException("Gemma 4の生成を中断しました")
+                        }
+                        check(generated.isNotBlank()) { "Gemma 4が空の応答を返しました" }
+                        sessionHistory = request.history +
+                            DialogueMessage(DialogueMessage.Role.USER, request.userText) +
+                            DialogueMessage(DialogueMessage.Role.ASSISTANT, generated.toString())
+                        succeeded = true
+                    } finally {
+                        if (!succeeded) {
+                            runCatching { conversation.cancelProcess() }
+                            closeConversation()
+                        }
                     }
+                } finally {
+                    lifecycleFinished = true
+                    generationLifecycle.finish(generation)
                 }
             }
         } finally {
-            generationLifecycle.finish(generation)
+            if (!lifecycleFinished) generationLifecycle.finish(generation)
         }
     }.flowOn(inferenceDispatcher)
 
