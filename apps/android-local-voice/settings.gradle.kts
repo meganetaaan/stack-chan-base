@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "stackchan-local-voice-poc"
+rootProject.name = "stackchan-android-local-voice"
 include(":app")

@@ -1,249 +1,66 @@
-# ｽﾀｯｸﾁｬﾝ Android Local Voice PoC
+# stack-chan-dock
 
-Android端末だけで、完全ローカルの日本語音声会話を動かすためのPoCです。
+stack-chan-dockは、ｽﾀｯｸﾁｬﾝをUSBでPCやスマートフォンへ接続し、それらの計算能力やサービスで能力を拡張する実験リポジトリです。
+`contracts/usb-cdc-v2`をｽﾀｯｸﾁｬﾝとの境界に置き、ｽﾀｯｸﾁｬﾝ側のFirmwareは身体とUSBデバイス、PCまたはスマートフォン上のdock appは音声処理や対話処理を担当します。
 
 ```text
-M5Stack CoreS3 microphone (16 kHz PCM, USB CDC)
-        ↓
-WebRTC VAD (20 ms frames) + adaptive RMS
-        ↓
-sherpa-onnx Whisper Small multilingual（language=ja）
-        ↓
-LiteRT-LM / Gemma 4、またはRunAnywhere llama.cpp / Agents A1 4B
-        ↓ streamed Japanese text
-Piper Plus Android AAR + Japanese voice model
-        ↓ PCM16（既定24 kHzへ変換）
-M5Stack CoreS3 AudioOut (USB CDC)
+Android local voice dock app ─┐
+                              ├── USB CDC v2 contract ── Stack-chan Firmware
+PC Codex voice dock app ──────┘                           （外部リポジトリ）
 ```
 
-Android端末をUSBホスト、M5Stack CoreS3をUSB Serial/JTAGデバイスとして接続します。
-会話パイプラインの音声I/Oには`SerialPcmAudioSource`と`SerialPcmAudioSink`を使います。
-USB切断時は会話を停止し、再接続後に画面から通信を再試行できます。
+## 用語
 
-## 実装済み
+- **dock**：ｽﾀｯｸﾁｬﾝをUSB経由で外部の計算環境へ接続し、能力を拡張する構成。
+- **dock app**：PCまたはスマートフォン上で動作し、USB CDC contractを実装するアプリ。
+- **USBホスト**：USB接続における役割名。
+- **Moddable host**：Moddable SDK側のhost applicationを指す用語であり、dock appの分類名には使用しない。
 
-- Gemma 4 E2B/E4BとAgents A1 4Bを切り替えるアプリ内LLM推論
-- モデル選択の保存、およびモデルごとに独立した保存領域
-- GPU初期化、モデル能力に応じたMTP有効化、GPU失敗時のCPU退避
-- RunAnywhere SDK 0.20.10とllama.cppによるAgents A1 4B GGUF推論
-- Agents A1から利用できる現在日時／バッテリー状態の端末ツール
-- 選択したLLMを途中再開し、サイズとSHA-256を検証してから配置するアプリ内ダウンローダー
-- RunAnywhere SDK 0.20.10によるWhisperファイル管理とONNXバックエンド登録
-- sherpa-onnxを直接使い、認識器生成時に`language=ja`を固定するバッチSTT
-- ランタイムに依存しない`LocalLanguageModel`境界と4ターンの短期履歴
-- LiteRT-LMの会話セッションを再利用するストリーミング生成
-- Gemmaのthinking無効化
-- 句点単位でのPiper Plus逐次合成とCoreS3 AudioOut再生
-- タップ式Push-to-Talk
-- WebRTC VADの20 msフレームと適応RMS判定を使う自動発話区切り
-- 350 ms未満のクリック音などを破棄し、15秒の強制打ち切りまで待たない誤検出処理
-- Whisperへ渡したPCMのWAV保存と、認識結果を対応付けるJSON metadata
-- 自動会話中の「発話待ち」「発話中」表示
-- Whisperの非音声字幕だけで構成された認識結果の破棄
-- LLMの初回ページ読み込みをモデル準備中に行うウォームアップ
-- APK更新後に保存済みLLMとWhisperを再利用する処理
-- 新経路の準備成功後に、旧版が保存したQwen3 4Bファイルだけを削除する移行処理
-- RunAnywhere SDKをバックエンドURLのないdevelopment構成で初期化する処理
-- 推論・再生の中断
-- 推奨Piper Plus音声のダウンロード、SHA-256検証、辞書展開、自動ロード
-- Piper音声モデル、JSON設定、OpenJTalk辞書のStorage Access Framework取込
-- USB CDCの自動検出、権限取得、HELLO handshake、切断処理
-- CoreS3マイクの16 kHz PCM受信とsequence欠損時の無音補完
-- Piper出力を24 kHzへ逐次変換し、5秒のproducer queueとcredit制御でCoreS3へ送る処理
-- 発話中の口パク、自律表情の一時停止、文単位の吹き出し表示
-- CoreS3側の認識中・発話中アイコン表示
-- Piper PCM長とUSB再生終了理由を記録するJSON Lines trace
-- USBシリアル向けバイナリフレームcodec、破損復帰parser、単体テスト
+## ディレクトリ
 
-## 開発環境
+| パス | 役割 |
+|---|---|
+| [`contracts/usb-cdc-v2`](contracts/usb-cdc-v2/README.md) | USB framing、音声制御、application eventの正本 |
+| [`apps/android-local-voice`](apps/android-local-voice/README.md) | Android端末上でASR、LLM、TTSをローカル実行するdock app |
+| [`apps/codex-voice`](apps/codex-voice/README.md) | PC上のCodex app-serverとｽﾀｯｸﾁｬﾝを接続するdock app |
 
-- Linux x86_64
-- `curl`、`tar`、`unzip`
-- Android Studio（IDEを使う場合）
-- arm64-v8a Android端末、Android 8.0以上
-- USBホスト機能を持つAndroid端末とデータ通信対応USBケーブル
-- USB音声対応Firmwareを書き込んだM5Stack CoreS3
-- 初回モデル取得時のみインターネット接続
-- Piper Plus Android AAR
-- 任意音声を手動設定する場合は、Piper Plus互換の日本語`.onnx`、対応する`.json`、OpenJTalk辞書
+各dock appは、build設定、依存関係、開発スクリプトを自身のディレクトリ内に持ちます。
+USB wire形式はdock appごとに定義せず、`contracts/usb-cdc-v2`を参照します。
 
-E2Bの配布ファイルは2,588,147,712 bytes、E4Bは3,659,530,240 bytes、Agents A1 4Bは2,708,805,312 bytesです。
-セットアップ開始時の空き容量は、E2BとAgents A1で3.2GiB以上、E4Bで4.0GiB以上を目安にしてください。
-両モデルは別々に保存されるため、両方を取得する場合はLiteRT-LMキャッシュ、Whisper、Piper Plusを含めて7GiB以上の余裕を確保してください。
-
-JDK 17とAndroid SDKはプロジェクト内の`.toolchains/`へ導入します。
-CLIビルドのGradleキャッシュも`.gradle-user-home/`へ分離するため、システム側のJavaやAndroid SDKを変更しません。
+## Android local voice dock app
 
 ```bash
+cd apps/android-local-voice
 ./scripts/bootstrap-dev.sh
-./scripts/dev.sh java -version
-```
-
-セットアップスクリプトはTemurin 17.0.19+10、Android Command-line Tools 14742923、Android SDK 37.0、Build Tools 35.0.0を固定して導入します。
-Android Studioから開く場合は、Gradle JDKに`.toolchains/temurin-17`を指定してください。
-
-## 1. Piper Plus AARを確認する
-
-この作業ディレクトリには、2026年7月14日時点の最新リリースである[Piper Plus v1.13.0](https://github.com/ayutaz/piper-plus/releases/tag/v1.13.0)から生成したAndroid AARを配置済みです。
-公式リリースにはAndroid AARがないため、タグ`v1.13.0`のソースと同リリースworkflowのarm64-v8a成果物からローカルビルドしました。
-
-```text
-app/libs/piper-plus-release.aar
-SHA-256: b43d4aeb46af952db7205106dfed68a51bab19fc8343370479a467caf9e3b688
-```
-
-次のコマンドで配置済みAARを検証できます。
-
-```bash
-sha256sum -c app/libs/piper-plus-release.aar.sha256
-```
-
-AARを差し替える場合は、インストールスクリプトを使います。
-
-```bash
-cd /path/to/stackchan-local-voice-poc
-./scripts/install_piper_aar.sh \
-  /path/to/piper-plus/android/piper-plus/build/outputs/aar/piper-plus-release.aar
-```
-
-スクリプトはPiper用ONNX Runtimeの名前をRunAnywhere側と分離し、AARとSHA-256記録を更新します。
-AAR本体はサイズと再配布条件を考慮して`.gitignore`の対象にしています。
-AAR未配置でもプロジェクトはコンパイルできますが、TTSのロードは無効です。
-AARは`com.piperplus.PiperPlus`をリフレクションで読み込むため、配置後はGradle Syncと再ビルドが必要です。
-
-## 2. Androidアプリをビルドする
-
-Android Studioでルートディレクトリを開くか、CLIを使います。
-
-```bash
 ./scripts/dev.sh ./gradlew :app:assembleDebug
 ```
 
-`gradle-wrapper.jar`はプロジェクトに含めています。
-Gradle 9.5.0の配布ZIPは`gradle-wrapper.properties`に記録したSHA-256と照合します。
+モデルの準備、Android端末への導入、実機検証は[Android dock appのREADME](apps/android-local-voice/README.md)を参照してください。
 
-## 3. CoreS3をUSB接続する
-
-CoreS3側は、stack-chan Firmwareの`feat/android-usb-audio` worktreeにある専用manifestを使います。
+## Codex voice dock app
 
 ```bash
-cd /path/to/stack-chan-firmware/firmware
-source "$HOME/.local/share/xs-dev-export.sh"
+cd apps/codex-voice
 npm ci
-npm run build:android-usb-audio
-npm run flash:android-usb-audio
+npm test
+npm run build
 ```
 
-書き込み後、Android端末をUSBホストとしてCoreS3へ接続します。
-初回はアプリがUSBデバイスの利用許可を求めます。
-画面の「CoreS3 USB」が「接続済み（PCM 16kHz入力／24kHz出力）」になれば会話を開始できます。
-通信仕様と障害時の確認方法は[USB CDC音声通信](docs/SERIAL_NEXT_STEP.md)を参照してください。
+Codex app-serverへの接続とsystemd user serviceの導入は[Codex dock appのREADME](apps/codex-voice/README.md)を参照してください。
 
-## 4. 端末上でセットアップする
+## リポジトリ全体の検証
 
-1. 「E2B（速度重視）」「E4B（品質重視）」「A1（ツール対応）」から選びます。
-   A1は現在日時とバッテリー状態を必要に応じて端末から取得できます。
-2. 「モデルをダウンロードして準備」を実行します。
-   選択したLLMをアプリ内へ取得し、SHA-256検証、対応ランタイムへのロード、初回ウォームアップまで行います。
-   旧版のQwen3 4Bがアプリ内部に残っている場合は、新経路の準備成功後に削除して保存領域を回収します。
-   中断したダウンロードは次回実行時に続きから再開します。
-   GPUを利用できない端末ではCPUへ退避し、画面に実際のバックエンドを表示します。
-3. 「推奨音声をダウンロードして準備」を実行します。
-   初回はつくよみちゃんコーパスの利用条件を確認します。
-   アプリが音声モデル、設定JSON、辞書ZIPを取得し、SHA-256検証、辞書展開、Piper Plusロードまで実行します。
-4. CoreS3のマイクへ向けて「録音開始」→発話→「録音終了・応答」で最初の会話を確認します。
-5. Push-to-Talkが安定した後に「自動VAD」を有効にします。
-
-任意のPiper Plus音声を使う場合は、「任意音声の手動設定」からONNX、JSON、OpenJTalk辞書を取り込み、「Piper Plusをロード」を実行します。
-
-LLMはバックアップ対象外のアプリ内部ストレージ、Piper Plusのモデルと辞書は`files/piper-plus/`へ保存されます。
-セットアップ後の推論、認識、合成はネットワークを使用しません。
-LLM-HubやAI Edge Galleryなど、別アプリのインストールや起動は不要です。
-
-## モデル設定を変更する
-
-LLMの取得情報は`model/GemmaModelManifest.kt`、ASRの取得情報は`model/ModelCatalog.kt`にあります。
-
-| 用途 | 構成 |
-|---|---|
-| LLM | Gemma 4 E2B/E4B（LiteRT-LM、2,048 tokens）またはAgents A1 4B Q4_K_M（llama.cpp、実機上限2,048 tokens） |
-| STT | sherpa-onnx Whisper Small multilingual、`language=ja`、4 CPU threads |
-| VAD | android-vad WebRTC 2.0.10、20 ms frames |
-| TTS | 自動取得したつくよみちゃん音声、または端末から取り込んだPiper Plus日本語モデル |
-
-LLMは`.litertlm`形式をLiteRT-LM、Agents A1のGGUFをRunAnywhere llama.cppで実行し、会話制御からは`LocalLanguageModel`として扱います。
-Agents A1のツール呼び出しはモデルアダプター内で処理し、ツールタグや思考タグをUIと音声合成へ渡しません。
-現在のモデルURLはHugging Faceのrevisionへ固定し、ファイルサイズとSHA-256も固定しています。
-別モデルへ差し替える場合は、形式だけでなくチャットテンプレート、thinking設定、MTP能力をアダプター側で確認してください。
-既定のSTTは同梱されたsherpa-onnx 1.12.20を直接使います。
-VADはWebRTC方式のため、外部モデルをダウンロードしません。
-モデルごとのライセンスと再配布条件は、アプリ配布前に個別確認してください。
-
-## テスト
-
-プロジェクト構造と純Kotlin部分は次で確認できます。
-`kotlinc`がない環境では、smoke testスクリプトが同等のGradle単体テストを実行します。
+各dock appの依存関係を準備した後、次のコマンドでcontract適合試験と両dock appのテストを実行できます。
 
 ```bash
-./scripts/dev.sh ./scripts/run_pure_kotlin_smoke.sh
-python3 ./scripts/check_project.py
+./scripts/verify.sh
 ```
 
-Android側の単体テストは、SDK環境で実行します。
+このスクリプトは依存関係をインストールしません。
+AndroidのJDKとSDKがない場合はAndroid dock appで`./scripts/bootstrap-dev.sh`を実行し、Codex dock appの`node_modules`がない場合は同じディレクトリで`npm ci`を実行してください。
 
-```bash
-./scripts/dev.sh ./gradlew :app:testDebugUnitTest
-```
+## リポジトリの境界
 
-## 音声診断ファイル
-
-アプリはWhisperへ渡した16 kHz PCMを、次の端末内ディレクトリへWAVとして保存します。
-
-```text
-/sdcard/Android/data/jp.stackchan.localvoicepoc/files/voice-diagnostics/recognition-captures/
-```
-
-同名のJSONには、自動VADまたはPush-to-Talkの区別、音声長、Whisperの生出力、除外後の認識結果、エラーを記録します。
-WAVはpre-rollと終端無音を含め、Whisperへ実際に渡したbyte列と一致します。
-保存件数は直近50件、WAV合計は50 MiBまでです。
-
-TTS再生の調査記録は次へ保存します。
-
-```text
-/sdcard/Android/data/jp.stackchan.localvoicepoc/files/voice-diagnostics/playback-traces/
-```
-
-JSON LinesにはPiper入力sample数、24 kHz変換後のPCM長、送信frame数、`SPEAKER_END`、`SPEAKER_DONE`、`SPEAKER_ABORT`、終了理由を時系列で記録します。
-再生が数秒で終了した場合は、`inputDurationMs`でPiperが返した音声長を確認し、`all_pcm_sent`、`speaker_end_sent`、`speaker_done_received`、`speaker_abort_sent`の順序から終了箇所を判定できます。
-PCへ回収する場合は次のコマンドを使います。
-
-```bash
-adb pull /sdcard/Android/data/jp.stackchan.localvoicepoc/files/voice-diagnostics ./voice-diagnostics
-```
-
-## 検証状況
-
-- Piper Plus v1.13.0 AARを組み込んだdebug APK生成は通過
-- GradleによるdebugコンパイルでLiteRT-LM 0.14.0 APIとの整合を確認
-- motorola razr 50 ultra上でRunAnywhere ONNXとPiper Plus JNIの同時ロードを確認
-- motorola razr 50 ultra上で旧Qwen3経路の会話開始を確認
-- 修正版Whisperの1秒無音デコードは1.19秒で、認識言語`ja`を確認
-- Gemma 4 E2Bのダウンロード、GPUロード、応答生成をmotorola razr 50 ultraで確認
-- Gemma 4 E4Bのダウンロード、GPUロード、応答生成をmotorola razr 50 ultraで確認
-- 推奨Piper Plus音声の自動取得、検証、辞書展開、非無音PCM生成をmotorola razr 50 ultraで確認
-
-詳細は`VALIDATION.md`を参照してください。
-
-## 次期設計
-
-速度優先のLLM交換、ASR候補、発話区切り、Piper Plusの低遅延化、スタックチャンの表情とサーボ、物理操作を含む設計は[目標アーキテクチャ](docs/TARGET_ARCHITECTURE.md)にまとめています。
-
-モデルの公表ベンチマークだけでは採用せず、motorola razr 50 ultra上のTTFT、生成速度、RTF、発熱で段階ごとに判定します。
-
-## PoCの境界
-
-この段階ではCoreS3のマイクとスピーカーを使う半二重会話です。
-USB発話の口パクと吹き出しは実装していますが、感情表現、サーボ同期、AEC、再生中の割り込み発話には対応していません。
-基本的なUSB音声対話は実機で確認済みです。
-80 ms送信と500 ms prebufferによる連続再生は、音量0の実機診断で8 kHz、16 kHz、24 kHzともstarvation 0回を確認しています。
-Android実機では、変更後の可聴音、口パク、吹き出し、USB抜き差し、各Piperモデルのsample rateを再確認する必要があります。
+このリポジトリは、複数のdock app構成を比較する実験場所です。
+Firmwareのsourceやdock app間で共有するruntime libraryは含めません。
+USB contractの変更時はversionを明示し、各dock appと外部Firmwareの適合試験を同じwire vectorで更新します。

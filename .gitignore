@@ -6,5 +6,5 @@
 local.properties
 **/build/
 *.iml
-app/libs/*.aar
-!app/libs/README.md
+apps/android-local-voice/app/libs/*.aar
+!apps/android-local-voice/app/libs/README.md

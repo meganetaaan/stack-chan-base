@@ -25,6 +25,12 @@ android {
         }
     }
 
+    sourceSets {
+        getByName("test") {
+            resources.directories.add(rootProject.file("../../contracts/usb-cdc-v2").path)
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 root = Path(__file__).resolve().parents[1]
+repository_root = root.parents[1]
 required = [
     "settings.gradle.kts",
     "gradle/libs.versions.toml",
@@ -48,7 +49,7 @@ required = [
     "app/src/main/java/jp/stackchan/localvoicepoc/speech/SherpaWhisperRecognizer.kt",
     "app/src/main/java/com/k2fsa/sherpa/onnx/SherpaOfflineApi.kt",
     "README.md",
-    "VALIDATION.md",
+    "docs/VALIDATION.md",
     "THIRD_PARTY_NOTICES.md",
     "gradle/wrapper/gradle-wrapper.jar",
     "scripts/bootstrap-dev.sh",
@@ -62,6 +63,13 @@ if missing:
     for path in missing:
         print(f"  - {path}")
     sys.exit(1)
+
+for shared_path in [
+    "contracts/usb-cdc-v2/README.md",
+    "contracts/usb-cdc-v2/test-vectors.json",
+]:
+    if not (repository_root / shared_path).is_file():
+        raise AssertionError(f"Missing shared repository file: {shared_path}")
 
 manifest_path = root / "app/src/main/AndroidManifest.xml"
 manifest = manifest_path.read_text(encoding="utf-8")

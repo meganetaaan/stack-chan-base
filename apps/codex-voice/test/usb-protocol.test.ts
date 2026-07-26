@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import test from 'node:test'
 import {
   decodeStackChanFrame,
@@ -12,6 +14,42 @@ import {
   StackChanFrameType,
   STACKCHAN_MAX_EVENT_BYTES,
 } from '../src/usb/protocol.js'
+
+type ContractFrameFields = {
+  type: number
+  flags: number
+  streamId: number
+  sequence: number
+  sampleRate: number
+  payloadHex: string
+}
+
+type ContractFrameVector = {
+  name: string
+  frame: ContractFrameFields
+  encodedHex: string
+}
+
+type InvalidContractFrameVector = {
+  name: string
+  reason: string
+  encodedHex: string
+}
+
+type ContractVectors = {
+  schema: string
+  protocolVersion: number
+  validFrames: ContractFrameVector[]
+  invalidFrames: InvalidContractFrameVector[]
+}
+
+const contractVectors = JSON.parse(
+  readFileSync(resolve(process.cwd(), '../../contracts/usb-cdc-v2/test-vectors.json'), 'utf8'),
+) as ContractVectors
+
+function fromHex(value: string): Uint8Array {
+  return Uint8Array.from(Buffer.from(value, 'hex'))
+}
 
 test('USB frame round-trips with CRC32 and v2 header fields', () => {
   const encoded = encodeStackChanFrame({
@@ -94,4 +132,47 @@ test('EVENT rejects payloads larger than the contract limit', () => {
 test('extended conversation status capability uses the next contract bit', () => {
   assert.equal(StackChanCapability.STATUS_EXTENDED, 1 << 11)
   assert.notEqual(STACKCHAN_HOST_CAPABILITIES & StackChanCapability.STATUS_EXTENDED, 0)
+})
+
+test('USB codec matches the shared contract frame vectors', () => {
+  assert.equal(contractVectors.schema, 'stackchan.usb-cdc.test-vectors.v1')
+  assert.equal(contractVectors.protocolVersion, 2)
+  for (const vector of contractVectors.validFrames) {
+    const expected = fromHex(vector.encodedHex)
+    const encoded = encodeStackChanFrame({
+      type: vector.frame.type as StackChanFrameType,
+      flags: vector.frame.flags,
+      streamId: vector.frame.streamId,
+      sequence: vector.frame.sequence,
+      sampleRate: vector.frame.sampleRate,
+      payload: fromHex(vector.frame.payloadHex),
+    })
+    assert.deepEqual(encoded, expected, `${vector.name} encoded bytes`)
+
+    const decoded = decodeStackChanFrame(expected)
+    assert.equal(decoded.type, vector.frame.type, `${vector.name} type`)
+    assert.equal(decoded.flags, vector.frame.flags, `${vector.name} flags`)
+    assert.equal(decoded.streamId, vector.frame.streamId, `${vector.name} stream ID`)
+    assert.equal(decoded.sequence, vector.frame.sequence, `${vector.name} sequence`)
+    assert.equal(decoded.sampleRate, vector.frame.sampleRate, `${vector.name} sample rate`)
+    assert.deepEqual(decoded.payload, fromHex(vector.frame.payloadHex), `${vector.name} payload`)
+  }
+})
+
+test('USB parser rejects shared corrupt vectors and resynchronizes', () => {
+  const invalid = contractVectors.invalidFrames[0]
+  const valid = contractVectors.validFrames[0]
+  assert.ok(invalid)
+  assert.ok(valid)
+  assert.equal(invalid.reason, 'crc_mismatch')
+  assert.throws(() => decodeStackChanFrame(fromHex(invalid.encodedHex)), /CRC mismatch/)
+
+  const corrupt = fromHex(invalid.encodedHex)
+  const expected = fromHex(valid.encodedHex)
+  const combined = new Uint8Array(corrupt.byteLength + expected.byteLength)
+  combined.set(corrupt)
+  combined.set(expected, corrupt.byteLength)
+  const decoded = new StackChanFrameParser().push(combined)
+  assert.equal(decoded.length, 1)
+  assert.deepEqual(encodeStackChanFrame(decoded[0]!), expected)
 })

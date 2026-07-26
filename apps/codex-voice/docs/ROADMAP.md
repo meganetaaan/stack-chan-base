@@ -58,7 +58,7 @@ Firmwareは結果を受信するまで、同じ`requestId`を2秒ごとに再送
 状態表示にはcapability bit 11の`STATUS_EXTENDED`を使用する。
 未対応Firmwareでは`listening`、`connecting`、`error`を`IDLE`へ縮退させ、音声経路は継続する。
 
-wire形式はリポジトリ直下の`docs/SERIAL_NEXT_STEP.md`に定義する。
+wire形式は[`contracts/usb-cdc-v2`](../../../contracts/usb-cdc-v2/README.md)に定義する。
 
 ## 常駐サービス
 
@@ -71,10 +71,10 @@ unitは`Restart=on-failure`、`RestartSec=2`、`TimeoutStopSec=15`を設定す�
 
 ## 検証
 
-bridge側はNode testとVitestでUSB framing、event parser、状態遷移、再試行、WebRTC、systemd unit生成を検査する。
+dock app側はNode testとVitestでUSB framing、event parser、状態遷移、再試行、WebRTC、systemd unit生成を検査する。
 start、stop、重複要求、blockedの長さ4までの全341操作列を列挙し、desired stateと表示状態の不変条件を確認する。
 開始終了Toneは音程順序とPCM境界に加え、開始音がRealtimeより先に終わること、終了音がRealtimeのスピーカー解放後に一度だけ鳴ること、後方スワイプが未完了の開始音を中断することを検査する。
-生成したunitは文字列比較だけでなく、実ホストの`systemd-analyze verify`にも通す。
+生成したunitは文字列比較だけでなく、実行環境の`systemd-analyze verify`にも通す。
 
 Firmware側はNode testでevent再送、10秒timeout、遅延result、状態表示の対応を検査する。
 CoreS3向けrelease firmwareの実ビルドでも、TypeScript、Piu resource、ESP-IDF linkを確認する。
@@ -85,7 +85,7 @@ CoreS3向けrelease firmwareの実ビルドでも、TypeScript、Piu resource、
 ### 2026-07-25の実機結果
 
 `/dev/ttyACM0`だけを明示し、`/dev/ttyACM1`には接続しなかった。
-最新developを統合したUSB音声hostをrelease buildして書き込み、Codex専用MODは実機の`xs`パーティションを検出するesptool経路で書き込みとdigest検証を行った。
+最新developを統合したUSB音声対応のModdable hostをrelease buildして書き込み、Codex専用MODは実機の`xs`パーティションを検出するesptool経路で書き込みとdigest検証を行った。
 
 手動ブリッジでは、standbyから前方スワイプでRealtimeを開始し、複数回の応答音声を切断なく再生した。
 後方スワイプでRealtimeを終了し、standbyへ戻ることを利用者と確認した。
@@ -95,7 +95,7 @@ systemd user serviceはUSB serial numberへ固定して導入し、USB、app-ser
 `WorkingDirectory`専用escapeと起動後の`is-active`検査を追加し、実unitの起動とparser testで回帰を防いだ。
 
 常駐動作中、再生後の`MIC_STOPPED`が一度欠落すると5秒でtimeoutし、Realtimeを再接続する反例を検出した。
-hostは同一streamの`MIC_STOP`を500ミリ秒ごとに再送し、Firmwareは直前に停止したstreamをHELLOまで記憶して`MIC_STOPPED`を冪等に再送するよう修正した。
+dock appは同一streamの`MIC_STOP`を500ミリ秒ごとに再送し、Firmwareは直前に停止したstreamをHELLOまで記憶して`MIC_STOPPED`を冪等に再送するよう修正した。
 旧streamの遅延停止が新しいマイクを止めないことは、stream IDの有限全列挙でも検査した。
 
 修正後の実機では、同じsystemdプロセスで約79秒間に6回の応答を連続再生した。

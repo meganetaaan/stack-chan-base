@@ -8,7 +8,7 @@
 
 この文書は、現在動作しているPoCを、低遅延の音声対話とスタックチャンの身体表現へ段階的に発展させるための設計である。
 
-現行実装の構成は[ARCHITECTURE.md](ARCHITECTURE.md)に、実測値は[VALIDATION.md](../VALIDATION.md)に記録している。
+現行実装の構成は[ARCHITECTURE.md](ARCHITECTURE.md)に、実測値は[VALIDATION.md](VALIDATION.md)に記録している。
 
 ## 実装反映状況
 
@@ -56,7 +56,7 @@ razr 50 ultra上のTTFT、生成速度、メモリ、発熱を測り、後述の
 
 ## 書籍から取り入れる設計
 
-参考書籍は[book_sakura.pdf](../../book_sakura.pdf)の『オープンソースで作る音声対話AI』である。
+参考書籍は[book_sakura.pdf](../../../../book_sakura.pdf)の『オープンソースで作る音声対話AI』である。
 
 書籍の記述とこのPoCへの反映を次に示す。
 

@@ -1,8 +1,11 @@
-# CoreS3 USB CDC音声通信
+# Stack-chan USB CDC v2 contract
 
-Android端末またはPC上のCodex音声ブリッジをUSBホスト、M5Stack CoreS3をUSB Serial/JTAGデバイスとして接続する。
+この文書は、ｽﾀｯｸﾁｬﾝとdock appの間で使うUSB CDC v2 wire contractの正本である。
+[Android local voice dock app](../../apps/android-local-voice/README.md)を動かすAndroid端末、または[PC上のCodex voice dock app](../../apps/codex-voice/README.md)を動かすPCをUSBホスト、M5Stack CoreS3をUSB Serial/JTAGデバイスとして接続する。
 Android側は`usb-serial-for-android`、Codex音声ブリッジはNode.jsの`serialport`でVID `0x303A`、PID `0x1001`のCDCポートを開く。
 通信速度の設定値は115,200 baudだが、実際の転送はUSB CDCで行われる。
+
+言語ごとのcodecは独立して実装し、共通の[`test-vectors.json`](test-vectors.json)でwire bytesの一致を検査する。
 
 ## 音声形式
 
@@ -61,7 +64,7 @@ USBホストはさらにcapability bit 9のstream ID対応を必須として確�
 
 Codex音声ブリッジは、上記に加えてcapability bit 10の`EVENT`対応を必須として確認する。
 Firmwareはpeerがbit 10を広告した場合だけ`EVENT`を送信する。
-このnegotiationにより、`EVENT`を解釈しない既存Android hostへFirmwareから未知のframe typeが送られることを防ぐ。
+このnegotiationにより、`EVENT`を解釈しない既存のAndroid dock appへFirmwareから未知のframe typeが送られることを防ぐ。
 
 録音は`MIC_START`、`MIC_STARTED`、`MICROPHONE_PCM`、`MIC_STOP`、`MIC_STOPPED`の順で制御する。
 USBホストは`MIC_STOPPED`を受信するまで、同じstream ID、sample rate、空payloadの`MIC_STOP`を500ミリ秒間隔で再送できる。
@@ -101,14 +104,14 @@ Codex音声ブリッジは、コマンド実行とファイル変更を次の共
 
 | direction | type | purpose |
 | --- | --- | --- |
-| host → Firmware | `approval.request` | 種別、タイトル、要約、詳細を表示する |
-| Firmware → host | `approval.presented` | 同じ`requestId`の画面表示完了を通知する |
-| Firmware → host | `approval.response` | `decision`を`approve`または`decline`で返す |
-| host → Firmware | `approval.resolved` | 自端末または別clientで処理済みの画面を閉じる |
-| host → Firmware | `approval.suspended` | app-server再接続中として操作を一時停止する |
-| Firmware → host | `conversation.start` | 頭上センサの前方スワイプによる会話開始を要求する |
-| Firmware → host | `conversation.stop` | 頭上センサの後方スワイプによる会話停止を要求する |
-| host → Firmware | `conversation.result` | 会話操作の受理結果と現在状態を返す |
+| Dock app → Firmware | `approval.request` | 種別、タイトル、要約、詳細を表示する |
+| Firmware → Dock app | `approval.presented` | 同じ`requestId`の画面表示完了を通知する |
+| Firmware → Dock app | `approval.response` | `decision`を`approve`または`decline`で返す |
+| Dock app → Firmware | `approval.resolved` | 自端末または別clientで処理済みの画面を閉じる |
+| Dock app → Firmware | `approval.suspended` | app-server再接続中として操作を一時停止する |
+| Firmware → Dock app | `conversation.start` | 頭上センサの前方スワイプによる会話開始を要求する |
+| Firmware → Dock app | `conversation.stop` | 頭上センサの後方スワイプによる会話停止を要求する |
+| Dock app → Firmware | `conversation.result` | 会話操作の受理結果と現在状態を返す |
 
 会話開始要求は次の形にする。
 
@@ -125,7 +128,7 @@ Codex音声ブリッジは、コマンド実行とファイル変更を次の共
 停止要求は`type="conversation.stop"`、`gesture="backwardSwipe"`とする。
 開始と停止はtoggleとして解釈せず、明示された操作だけを適用する。
 
-hostは次の形で結果を返す。
+dock appは次の形で結果を返す。
 
 ```json
 {
@@ -142,13 +145,13 @@ hostは次の形で結果を返す。
 
 Firmwareは結果を受信するまで、同じeventを同じ`requestId`で2秒ごとに再送する。
 再送は10秒で停止し、画面をエラー状態へ移す。
-hostは直近64件の結果を保持し、同じ`requestId`の再送で会話を二重に開始または停止しない。
+dock appは直近64件の結果を保持し、同じ`requestId`の再送で会話を二重に開始または停止しない。
 異なる論理操作に同じ`requestId`を再利用しない。
 
 `approval.request`の詳細本文は16 KiBまでとし、切り詰めた場合は`truncated=true`を設定する。
-hostは`approval.presented`を受け取るまで同じ`requestId`のrequestを再送でき、Firmwareは冪等に扱う。
+dock appは`approval.presented`を受け取るまで同じ`requestId`のrequestを再送でき、Firmwareは冪等に扱う。
 Firmwareはresponse送信後も画面を「送信中」として保持し、`approval.resolved`まで同じdecisionを再送できる。
-hostは重複responseへ二重にJSON-RPC応答してはならない。
+dock appは重複responseへ二重にJSON-RPC応答してはならない。
 
 承認自体に時間制限は設けない。
 USB切断時は未解決のCodex server requestを拒否せず保持し、再接続後に画面を復元する。
@@ -188,7 +191,7 @@ traceにはPCM本体と字幕本文を保存しない。
 PCへ取得したschema version 2のtraceは、Firmwareリポジトリの`usb-audio-diagnostics.py --replay-trace`で再生できる。
 PC側はPCM本体を無音で再生成し、記録されたwrite境界と`startedElapsedUs`の間隔を再現する。
 
-## 接続確認
+## Android dock appでの接続確認
 
 1. USB音声対応Firmwareを書き込んだCoreS3をAndroid端末へ接続する。
 2. AndroidのUSB利用許可を承認する。

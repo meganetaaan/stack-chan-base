@@ -81,7 +81,7 @@ Androidはこの時点までに22 frame、84,480 bytesのPCMを連番で送信�
 | F-04 | GREEN確認 | Firmwareの送信queueに旧sessionのcreditとterminal controlが残り、新sessionへ配送され得る。 | stopとrestartの間へ送信遅延を挟む。 | controlへstream IDを付け、旧eventを受信側と送信側の双方で除外する。 |
 | F-05 | GREEN確認 | speaker busy中の新しい`SPEAKER_START`が旧sessionを通知なしで破棄する。 | active中に二つ目のstartを送る。 | 同一streamの冪等retry以外はbusy errorになり、旧sessionを維持する。 |
 | F-06 | GREEN確認 | 16 KiBのnative USB受信ringに対し12 KiBのcreditを許可し、未読データが残る場合の余裕が小さい。code 3が三原因を兼ねるため再発時に切り分けられない。 | ring残量とPCM wire burstの合計を検査し、sequence、PCM queue、字幕queueのerror codeを個別に検査する。 | 32 KiB ring、16 KiB read、8 KiB creditで不変条件を満たし、三原因をcode 6、7、8で識別する。 |
-| F-07 | GREEN確認 | `MIC_STOPPED`が一度欠落すると、Firmwareは停止済みstreamを忘れて再送`MIC_STOP`を無視し、hostが5秒後にsession全体を再接続する。 | 最初のACKを欠落させ、hostが同じstreamの`MIC_STOP`を再送することと、Firmwareが再送へ冪等に応答することを検査する。 | hostは500ミリ秒間隔で停止要求を再送する。Firmwareは直前の停止streamをHELLOまで記憶してACKを再送し、旧streamの停止要求を新sessionへ適用しない。 |
+| F-07 | GREEN確認 | `MIC_STOPPED`が一度欠落すると、Firmwareは停止済みstreamを忘れて再送`MIC_STOP`を無視し、dock appが5秒後にsession全体を再接続する。 | 最初のACKを欠落させ、dock appが同じstreamの`MIC_STOP`を再送することと、Firmwareが再送へ冪等に応答することを検査する。 | dock appは500ミリ秒間隔で停止要求を再送する。Firmwareは直前の停止streamをHELLOまで記憶してACKを再送し、旧streamの停止要求を新sessionへ適用しない。 |
 
 ## プロトコル互換性
 
@@ -94,7 +94,7 @@ AndroidとFirmwareはcapability bit 9の`STREAM_ID`を必須とし、version 1�
 AndroidではActivityの単一性、接続世代、マイク順序とoverflow、スピーカーerror伝播とabort順序、最大payload、LLM callback欠落、部分応答失敗、停止順序、モデル変更排他、VAD雑音床を個別の回帰テストへ固定した。
 Firmwareではspeaker session、Worker応答、送信queue、wire codecを純粋関数として検査した。
 状態照合を除いたbroken variantでは有限列挙が反例を検出し、修正版では同じ反例が成立しないことを確認した。
-`MIC_STOPPED`欠落の実機反例に対しては、host側テストで最初のACKだけを捨て、同一streamの再送で停止が確定することをRED-GREENで確認した。
+`MIC_STOPPED`欠落の実機反例に対しては、dock app側テストで最初のACKだけを捨て、同一streamの再送で停止が確定することをRED-GREENで確認した。
 Firmware側では停止済みstreamへの重複停止、強制停止後の再送、HELLOによる履歴破棄を検査した。
 さらに三つのstream IDから異なる旧・現IDを選ぶ6通りを全列挙し、旧streamの停止要求が現sessionを変更しないことを確認した。
 

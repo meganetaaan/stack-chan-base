@@ -1,4 +1,4 @@
-# Stack-chan Codex Voice Bridge
+# Stack-chan Codex Voice Dock App
 
 CoreS3のUSBマイク、スピーカー、状態表示、承認UIを、ローカルで動作中のCodex app-server daemonへ接続するTypeScript製CLIです。
 
@@ -16,7 +16,7 @@ WebSocket音声transportはAPIキー認証を要求しますが、このブリ�
 ## セットアップ
 
 ```bash
-cd bridge/codex-stackchan-voice
+cd apps/codex-voice
 npm ci
 npm test
 npm run build
@@ -129,9 +129,16 @@ journalctl --user -u stackchan-codex-voice.service -f
 同名unitがこのインストーラの生成物でない場合は上書きしません。
 インストーラはunitを有効化した後に`is-active`を検査し、起動できないunitを成功として報告しません。
 
+旧`bridge/codex-stackchan-voice`または`hosts/codex-voice`から移行する場合、既存unitには移動前のCLI絶対パスが残っています。
+新しいディレクトリで同じオプションを指定してインストーラを再実行した後、unitを明示的に再起動してください。
+
+```bash
+systemctl --user restart stackchan-codex-voice.service
+```
+
 ## Firmware MOD
 
-USB音声対応host firmwareをCoreS3へ書き込んだ後、Stack-chan firmwareリポジトリからCodex専用MODを導入します。
+USB音声対応のModdable hostをCoreS3へ書き込んだ後、Stack-chan firmwareリポジトリからCodex専用MODを導入します。
 
 ```bash
 cd firmware
@@ -140,7 +147,7 @@ npm run mod:m5stackchan_cores3 -- \
   --port /dev/ttyACM0
 ```
 
-現在のfirmware wrapperは、接続中のホストから`xs`パーティションとfirmware versionを検査し、MODをesptoolで直接書き込んでverifyします。
+現在のfirmware wrapperは、接続中のModdable hostから`xs`パーティションとfirmware versionを検査し、MODをesptoolで直接書き込んでverifyします。
 このMODは既定の`onContextCreated`を置き換えます。
 前方スワイプを開始、後方スワイプを停止へ専有するため、既定の撫で動作とボタン操作は動作しません。
 
@@ -187,7 +194,7 @@ ICEテストは、単発のSTUN応答欠落後も監視を続けること、4秒
 ブリッジはremote RTPを再生の正本とし、app-serverの`thread/realtime/transcript/done`を終端の補助信号として使います。
 終端通知より遅れて届いたRTPは新しい応答として再生せず、現在の再生を切断するエラーにも変換しません。
 
-USB wire contractはリポジトリ直下の`docs/SERIAL_NEXT_STEP.md`を参照してください。
+USB wire contractは[`contracts/usb-cdc-v2`](../../contracts/usb-cdc-v2/README.md)を参照してください。
 
 ## 今後の計画
 
