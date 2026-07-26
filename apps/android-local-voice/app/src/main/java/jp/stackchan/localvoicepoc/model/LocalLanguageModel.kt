@@ -50,4 +50,9 @@ interface LocalLanguageModel : AutoCloseable {
     fun generate(request: GenerationRequest): Flow<String>
 
     suspend fun cancel()
+
+    suspend fun shutdown() {
+        cancel()
+        close()
+    }
 }

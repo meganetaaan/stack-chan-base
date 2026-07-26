@@ -54,6 +54,7 @@ export type OpusRtpAudioSenderScheduler = {
 export type OpusRtpAudioSenderOptions = {
   scheduler?: OpusRtpAudioSenderScheduler
   onError?: (error: Error) => void
+  payloadType?: number
 }
 
 const defaultAudioSenderScheduler: OpusRtpAudioSenderScheduler = {
@@ -130,6 +131,7 @@ export class OpusRtpAudioSender {
   readonly #ssrc = randomUint32()
   readonly #scheduler: OpusRtpAudioSenderScheduler
   readonly #onError: ((error: Error) => void) | undefined
+  readonly #payloadType: number
   #sequenceNumber = randomUint16()
   #timestamp = randomUint32()
   #sourceSampleRate = 0
@@ -145,6 +147,10 @@ export class OpusRtpAudioSender {
     this.#track = track
     this.#scheduler = options.scheduler ?? defaultAudioSenderScheduler
     this.#onError = options.onError
+    this.#payloadType = options.payloadType ?? RTP_PAYLOAD_TYPE_FALLBACK
+    if (!Number.isInteger(this.#payloadType) || this.#payloadType < 0 || this.#payloadType > 127) {
+      throw new RangeError('RTP payload type must be an integer from 0 through 127')
+    }
     this.#encoder.setBitrate(WEBRTC_OPUS_BITRATE)
   }
 
@@ -252,7 +258,7 @@ export class OpusRtpAudioSender {
       new RtpPacket(
         new RtpHeader({
           version: 2,
-          payloadType: RTP_PAYLOAD_TYPE_FALLBACK,
+          payloadType: this.#payloadType,
           sequenceNumber: this.#sequenceNumber,
           timestamp: this.#timestamp,
           ssrc: this.#ssrc,
@@ -350,9 +356,6 @@ export class RealtimeWebRtcSession
 
     const localTrack = new MediaStreamTrack({ kind: 'audio' })
     this.#localTrack = localTrack
-    this.#sender = new OpusRtpAudioSender(localTrack, {
-      onError: (error) => this.#fail(error),
-    })
     peer.addTrack(localTrack)
 
     const dataChannel = peer.createDataChannel('oai-events')
@@ -376,6 +379,10 @@ export class RealtimeWebRtcSession
         ...(this.#options.voice ? { voice: this.#options.voice } : {}),
       })
       await peer.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+      this.#sender = new OpusRtpAudioSender(localTrack, {
+        onError: (error) => this.#fail(error),
+        payloadType: opusPayloadTypeFromSdp(answerSdp),
+      })
       this.#sender.start()
       const ready = Promise.all([
         this.#connected.promise,
@@ -520,6 +527,15 @@ export class RealtimeWebRtcSession
     this.#closedDeferred.resolve(error)
     this.emit('close', error)
   }
+}
+
+export function opusPayloadTypeFromSdp(sdp: string): number {
+  const match = /^a=rtpmap:(\d+) opus\/48000(?:\/\d+)?\s*$/im.exec(sdp)
+  if (!match) return RTP_PAYLOAD_TYPE_FALLBACK
+  const payloadType = Number(match[1])
+  return Number.isInteger(payloadType) && payloadType >= 0 && payloadType <= 127
+    ? payloadType
+    : RTP_PAYLOAD_TYPE_FALLBACK
 }
 
 function randomUint16(): number {

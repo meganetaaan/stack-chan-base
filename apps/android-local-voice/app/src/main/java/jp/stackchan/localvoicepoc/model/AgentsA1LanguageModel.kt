@@ -14,15 +14,23 @@ import com.runanywhere.sdk.public.extensions.cancelGeneration
 import com.runanywhere.sdk.public.extensions.generate
 import com.runanywhere.sdk.public.extensions.loadModel
 import com.runanywhere.sdk.public.extensions.unloadModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 class AgentsA1LanguageModel(
     context: Context,
     private val tools: DeviceToolRegistry = DeviceToolRegistry(context),
 ) : LocalLanguageModel {
+    private val operationMutex = Mutex()
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
     private var loadedModel: ModelInfo? = null
 
     override val isLoaded: Boolean get() = loadedModel != null
@@ -33,7 +41,7 @@ class AgentsA1LanguageModel(
         modelSpec: LanguageModelSpec,
         modelFile: File,
         preference: LanguageModelBackendPreference,
-    ): LanguageModelBackend {
+    ): LanguageModelBackend = operationMutex.withLock {
         require(modelSpec.runtime == LanguageModelRuntime.LLAMA_CPP)
         check(modelFile.isFile) { "LLMモデルが見つかりません: ${modelFile.absolutePath}" }
         loadedModel?.let { unload(it) }
@@ -56,35 +64,39 @@ class AgentsA1LanguageModel(
             result.error_message.ifBlank { "${modelSpec.name}をllama.cppへロードできません" }
         }
         loadedModel = info
-        return LanguageModelBackend.LLAMA_CPP
+        LanguageModelBackend.LLAMA_CPP
     }
 
     override fun generate(request: GenerationRequest): Flow<String> = flow {
-        check(isLoaded) { "Agents A1がロードされていません" }
-        val warmUp = isWarmUp(request)
-        var prompt = conversationPrompt(request, includeTools = !warmUp)
-        val called = mutableSetOf<String>()
-        repeat(MAX_TOOL_CALLS + 1) { attempt ->
-            val generated = generateBuffered(prompt, request)
-            val call = AgentsA1ToolCallParser.parse(generated)
-            if (call == null) {
-                val visible = AgentsA1ToolCallParser.visibleText(generated)
-                if (isWarmUp(request)) {
-                    check(generated.isNotBlank()) { "Agents A1が空の応答を返しました" }
-                    emit(visible.ifBlank { "はい" })
-                } else {
-                    check(visible.isNotBlank()) { "Agents A1が空の応答を返しました" }
-                    emit(visible)
+        operationMutex.withLock {
+            check(isLoaded) { "Agents A1がロードされていません" }
+            val warmUp = isWarmUp(request)
+            var prompt = conversationPrompt(request, includeTools = !warmUp)
+            val called = mutableSetOf<String>()
+            repeat(MAX_TOOL_CALLS + 1) { attempt ->
+                val generated = generateBuffered(prompt, request)
+                val call = AgentsA1ToolCallParser.parse(generated)
+                if (call == null) {
+                    val visible = AgentsA1ToolCallParser.visibleText(generated)
+                    if (isWarmUp(request)) {
+                        check(generated.isNotBlank()) { "Agents A1が空の応答を返しました" }
+                        emit(visible.ifBlank { "はい" })
+                    } else {
+                        check(visible.isNotBlank()) { "Agents A1が空の応答を返しました" }
+                        emit(visible)
+                    }
+                    return@flow
                 }
-                return@flow
+                check(attempt < MAX_TOOL_CALLS) { "1回の応答で利用できるツール回数を超えました" }
+                check(call.name in tools.supportedNames) { "未対応のツールです: ${call.name}" }
+                check(called.add("${call.name}:${call.arguments}")) {
+                    "同じツール呼び出しの繰り返しを停止しました: ${call.name}"
+                }
+                val result = tools.execute(call)
+                prompt = continueAfterTool(prompt, generated, result)
             }
-            check(attempt < MAX_TOOL_CALLS) { "1回の応答で利用できるツール回数を超えました" }
-            check(call.name in tools.supportedNames) { "未対応のツールです: ${call.name}" }
-            check(called.add("${call.name}:${call.arguments}")) { "同じツール呼び出しの繰り返しを停止しました: ${call.name}" }
-            val result = tools.execute(call)
-            prompt = continueAfterTool(prompt, generated, result)
+            error("Agents A1のツール処理が終了しませんでした")
         }
-        error("Agents A1のツール処理が終了しませんでした")
     }
 
     private suspend fun generateBuffered(requestText: String, request: GenerationRequest): String {
@@ -161,12 +173,26 @@ class AgentsA1LanguageModel(
 
     override suspend fun cancel() {
         RunAnywhere.cancelGeneration()
+        operationMutex.withLock { }
+    }
+
+    override suspend fun shutdown() {
+        RunAnywhere.cancelGeneration()
+        operationMutex.withLock {
+            val model = loadedModel ?: return@withLock
+            loadedModel = null
+            unload(model)
+        }
     }
 
     override fun close() {
-        val model = loadedModel ?: return
-        loadedModel = null
-        runCatching { runBlocking { unload(model) } }
+        cleanupScope.launch {
+            operationMutex.withLock {
+                val model = loadedModel ?: return@withLock
+                loadedModel = null
+                runCatching { unload(model) }
+            }
+        }
     }
 
     private suspend fun unload(model: ModelInfo) {

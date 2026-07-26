@@ -162,14 +162,31 @@ class LiteRtGemmaLanguageModel(
         cancelRequested = true
         runCatching { generatingConversation?.cancelProcess() }
             .onFailure { Log.w(TAG, "LiteRT-LM cancellation failed", it) }
+        operationMutex.withLock { }
+    }
+
+    override suspend fun shutdown() {
+        cancelRequested = true
+        runCatching { generatingConversation?.cancelProcess() }
+        operationMutex.withLock {
+            closeConversation()
+            closeEngine()
+            ExperimentalFlags.enableSpeculativeDecoding = null
+        }
     }
 
     override fun close() {
         cancelRequested = true
         runCatching { generatingConversation?.cancelProcess() }
-        closeConversation()
-        closeEngine()
-        ExperimentalFlags.enableSpeculativeDecoding = null
+        if (operationMutex.tryLock()) {
+            try {
+                closeConversation()
+                closeEngine()
+                ExperimentalFlags.enableSpeculativeDecoding = null
+            } finally {
+                operationMutex.unlock()
+            }
+        }
     }
 
     private fun initializeEngine(

@@ -47,7 +47,7 @@ class PiperDictionaryExtractorTest {
             createArchive(
                 archive,
                 mapOf(
-                    "${PiperAssetLinks.DICTIONARY_ENTRY_PREFIX}../../outside.txt" to "bad",
+                    "${PiperAssetLinks.DICTIONARY_ENTRY_PREFIX}../outside.txt" to "bad",
                 ),
             )
 

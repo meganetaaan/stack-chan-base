@@ -1,9 +1,14 @@
 # Piper Plus Android setup
 
-## 配置済みAAR
+## AARのローカル配置
 
-この作業ディレクトリには、Piper Plus v1.13.0からローカルビルドしたAARを配置済みです。
-公式リリースにはAndroid AARがないため、タグ`v1.13.0`のAndroidラッパーと同リリースworkflowのarm64-v8a成果物を組み合わせています。
+Piper Plus AARはGit管理していないため、fresh cloneには含まれません。
+タグ`v1.13.0`のAndroidラッパーと同リリースworkflowのarm64-v8a成果物からローカルビルドし、インストールスクリプトで配置してください。
+
+```bash
+./scripts/install_piper_aar.sh \
+  /path/to/piper-plus/android/piper-plus/build/outputs/aar/piper-plus-release.aar
+```
 
 ```bash
 sha256sum -c app/libs/piper-plus-release.aar.sha256

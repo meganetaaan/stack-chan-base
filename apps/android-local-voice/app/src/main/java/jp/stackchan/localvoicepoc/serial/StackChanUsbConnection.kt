@@ -58,7 +58,7 @@ class StackChanUsbConnection(context: Context) : StackChanUsbTransport, AutoClos
     private var deviceConnection: UsbDeviceConnection? = null
     private var port: UsbSerialPort? = null
     private var ioManager: SerialInputOutputManager? = null
-    private var handshakeTimeout: Job? = null
+    @Volatile private var handshakeTimeout: Job? = null
     private var receiverRegistered = false
     @Volatile private var writeObserver: StackChanUsbWriteObserver? = null
 

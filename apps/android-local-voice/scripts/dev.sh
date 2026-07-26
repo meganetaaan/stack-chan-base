@@ -22,7 +22,7 @@ export GRADLE_USER_HOME=${STACKCHAN_GRADLE_USER_HOME:-"$ROOT/.gradle-user-home"}
 export PATH="$JAVA_HOME/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
 if [[ $# -eq 0 ]]; then
-  exec "${SHELL:-/bin/bash}" --noprofile --norc
+  exec /bin/bash --noprofile --norc
 fi
 
 exec "$@"

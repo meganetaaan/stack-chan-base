@@ -2,6 +2,7 @@ package jp.stackchan.localvoicepoc.mcp
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.sse.SSE
 import io.ktor.client.request.header
 import io.modelcontextprotocol.kotlin.sdk.client.Client
@@ -18,6 +19,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 
 fun interface McpApprovalHandler {
     suspend fun approve(request: McpApprovalRequest): Boolean
@@ -31,6 +34,7 @@ data class McpApprovalRequest(
 
 class AndroidMcpToolProvider(
     private val profiles: McpProfileStore,
+    private val inlineServerHosts: Set<String> = emptySet(),
     private val approvalHandler: McpApprovalHandler,
 ) : McpToolProvider {
     private data class Connection(
@@ -41,8 +45,8 @@ class AndroidMcpToolProvider(
     )
     private data class Route(val connection: Connection, val toolName: String)
 
-    private val connections = mutableMapOf<String, Connection>()
-    private val routes = mutableMapOf<String, Route>()
+    private val connections = ConcurrentHashMap<String, Connection>()
+    private val routes = ConcurrentHashMap<String, Route>()
     private var lifecycleSink: suspend (String, String, String?) -> Unit = { _, _, _ -> }
 
     override fun setLifecycleSink(sink: suspend (type: String, serverLabel: String, error: String?) -> Unit) {
@@ -53,17 +57,30 @@ class AndroidMcpToolProvider(
         closeConnection(request.serverLabel)
         val resolved = request.connectorId?.let(profiles::resolve)
         val url = resolved?.profile?.serverUrl ?: requireNotNull(request.serverUrl).also {
-            require(java.net.URI(it).scheme == "https") { "インラインMCP URLはHTTPSに限ります" }
+            val uri = URI(it)
+            require(uri.scheme == "https") { "インラインMCP URLはHTTPSに限ります" }
+            require(inlineServerHosts.any { allowed -> allowed.equals(uri.host, ignoreCase = true) }) {
+                "インラインMCP URLのホストは許可されていません。MCPプロファイルを使用してください"
+            }
         }
         val token = resolved?.bearerToken
-        val http = HttpClient(CIO) { install(SSE) }
+        val http = HttpClient(CIO) {
+            install(SSE)
+            install(HttpTimeout) {
+                connectTimeoutMillis = MCP_CONNECT_TIMEOUT_MS
+                requestTimeoutMillis = MCP_REQUEST_TIMEOUT_MS
+                socketTimeoutMillis = MCP_SOCKET_TIMEOUT_MS
+            }
+        }
         val client = Client(Implementation(name = "stackchan-android", version = "1.0.0"))
         val transport = StreamableHttpClientTransport(client = http, url = url) {
             token?.let { header("Authorization", "Bearer $it") }
         }
+        var registeredConnection: Connection? = null
         try {
             client.connect(transport)
             val connection = Connection(request, client, http, resolved?.profile?.forceApproval == true)
+            registeredConnection = connection
             connections[request.serverLabel] = connection
             return client.listTools(ListToolsRequest()).tools
                 .filter { request.allowedTools == null || it.name in request.allowedTools }
@@ -87,6 +104,9 @@ class AndroidMcpToolProvider(
                     )
                 }
         } catch (error: Throwable) {
+            registeredConnection?.let { connection ->
+                connections.remove(request.serverLabel, connection)
+            }
             http.close()
             throw error
         }
@@ -123,11 +143,17 @@ class AndroidMcpToolProvider(
 
     private fun closeConnection(label: String) {
         connections.remove(label)?.httpClient?.close()
-        routes.entries.removeAll { it.value.connection.request.serverLabel == label }
+        routes.entries.removeIf { it.value.connection.request.serverLabel == label }
     }
 
     private fun alias(label: String, name: String): String =
         "mcp__${safe(label)}__${safe(name)}"
 
     private fun safe(value: String): String = value.replace(Regex("[^A-Za-z0-9_]"), "_")
+
+    private companion object {
+        const val MCP_CONNECT_TIMEOUT_MS = 10_000L
+        const val MCP_REQUEST_TIMEOUT_MS = 30_000L
+        const val MCP_SOCKET_TIMEOUT_MS = 30_000L
+    }
 }

@@ -18,6 +18,7 @@ class BootingSerialPort extends EventEmitter {
   isOpen = false
   helloCount = 0
   microphoneStopCount = 0
+  speakerStartCount = 0
   speakerEndCount = 0
   speakerAbortCount = 0
   microphoneStopAcknowledgementsToDrop = 0
@@ -28,16 +29,19 @@ class BootingSerialPort extends EventEmitter {
   readonly #streamMicrophone: boolean
   readonly #acknowledgeMicrophoneStop: boolean
   readonly #streamSpeaker: boolean
+  readonly #helloCapabilities: number
 
   constructor(
     streamMicrophone = false,
     acknowledgeMicrophoneStop = false,
     streamSpeaker = false,
+    helloCapabilities = STACKCHAN_HOST_CAPABILITIES,
   ) {
     super()
     this.#streamMicrophone = streamMicrophone
     this.#acknowledgeMicrophoneStop = acknowledgeMicrophoneStop
     this.#streamSpeaker = streamSpeaker
+    this.#helloCapabilities = helloCapabilities
   }
 
   open(callback: (error?: Error | null) => void): void {
@@ -63,7 +67,7 @@ class BootingSerialPort extends EventEmitter {
           type: StackChanFrameType.CONTROL,
           flags: StackChanControl.HELLO_ACK,
           streamId: 0,
-          payload: helloPayload(STACKCHAN_MAX_PAYLOAD_BYTES, STACKCHAN_HOST_CAPABILITIES),
+          payload: helloPayload(STACKCHAN_MAX_PAYLOAD_BYTES, this.#helloCapabilities),
         })
         setImmediate(() => this.emit('data', Buffer.from(response)))
         continue
@@ -105,6 +109,7 @@ class BootingSerialPort extends EventEmitter {
         continue
       }
       if (this.#streamSpeaker && frame.flags === StackChanControl.SPEAKER_START) {
+        this.speakerStartCount += 1
         const credit = encodeStackChanFrame({
           type: StackChanFrameType.CONTROL,
           flags: StackChanControl.SPEAKER_CREDIT,
@@ -143,6 +148,13 @@ class BootingSerialPort extends EventEmitter {
   destroy(): void {
     this.destroyed = true
   }
+
+  emitFrames(...frames: Parameters<typeof encodeStackChanFrame>[0][]): void {
+    this.emit(
+      'data',
+      Buffer.concat(frames.map((frame) => Buffer.from(encodeStackChanFrame(frame)))),
+    )
+  }
 }
 
 test('USB handshake clears reset lines and retries HELLO while CoreS3 boots', async () => {
@@ -161,6 +173,50 @@ test('USB handshake clears reset lines and retries HELLO while CoreS3 boots', as
   await device.close()
   assert.equal(port.flushed, true)
   assert.equal(port.destroyed, true)
+})
+
+test('USB handshake failure releases the port and allows retrying the same device', async () => {
+  const invalidPort = new BootingSerialPort(false, false, false, 0)
+  const validPort = new BootingSerialPort()
+  const ports = [invalidPort, validPort]
+  const device = new UsbStackChanDevice({
+    portPath: '/dev/fake-stackchan',
+    portFactory: () => ports.shift()!,
+    openSettleMilliseconds: 0,
+  })
+
+  await assert.rejects(device.connect(new AbortController().signal), /missing required USB capabilities/)
+  assert.equal(invalidPort.isOpen, false)
+  const capabilities = await device.connect(new AbortController().signal)
+
+  assert.equal(capabilities.event, true)
+  await device.close()
+})
+
+test('malformed speaker credit fails playback without escaping the data listener', async () => {
+  const port = new BootingSerialPort(false, false, true)
+  const device = new UsbStackChanDevice({
+    portPath: '/dev/fake-stackchan',
+    portFactory: () => port,
+    openSettleMilliseconds: 0,
+  })
+  await device.connect(new AbortController().signal)
+  const source = (async function* () {
+    for (let index = 0; index < 3; index += 1) {
+      yield pcmChunk(new Uint8Array(3_840), 24_000)
+    }
+  })()
+  const playback = device.playAudio(source, new AbortController().signal)
+  await waitUntil(() => port.speakerStartCount === 1)
+  port.emitFrames({
+    type: StackChanFrameType.CONTROL,
+    flags: StackChanControl.SPEAKER_CREDIT,
+    streamId: 1,
+    payload: Uint8Array.of(1),
+  })
+
+  await assert.rejects(playback, /invalid credit payload/)
+  await device.close()
 })
 
 test('USB speaker abort does not wait for SPEAKER_DONE timeout', async () => {

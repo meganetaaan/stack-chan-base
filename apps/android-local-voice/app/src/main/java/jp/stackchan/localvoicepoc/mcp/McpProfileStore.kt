@@ -69,7 +69,14 @@ class McpProfileStore(context: Context) {
     private fun validateUrl(url: String, allowCleartext: Boolean) {
         val uri = java.net.URI(url)
         require(uri.host != null) { "MCP URLが不正です" }
-        require(uri.scheme == "https" || (uri.scheme == "http" && allowCleartext)) {
+        require(
+            uri.scheme == "https" ||
+                (
+                    uri.scheme == "http" &&
+                        allowCleartext &&
+                        uri.host.lowercase() in CLEARTEXT_MCP_HOSTS
+                    )
+        ) {
             "HTTP接続には平文通信の明示許可が必要です"
         }
     }
@@ -82,6 +89,7 @@ class McpProfileStore(context: Context) {
 
     private fun decrypt(value: String): String {
         val bytes = Base64.decode(value, Base64.NO_WRAP)
+        require(bytes.size > IV_BYTES) { "保存されたMCP認証情報が破損しています" }
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, bytes.copyOfRange(0, IV_BYTES)))
         return cipher.doFinal(bytes.copyOfRange(IV_BYTES, bytes.size)).decodeToString()
@@ -111,6 +119,7 @@ class McpProfileStore(context: Context) {
         const val KEY_ALIAS = "stackchan_mcp_profiles"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val IV_BYTES = 12
+        val CLEARTEXT_MCP_HOSTS = setOf("localhost", "127.0.0.1", "10.0.2.2")
     }
 }
 

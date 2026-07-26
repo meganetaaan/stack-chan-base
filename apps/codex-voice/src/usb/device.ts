@@ -155,22 +155,39 @@ export class UsbStackChanDevice implements StackChanDevice {
       (new SerialPort({ path: portPath, baudRate: 115_200, autoOpen: false }) as unknown as SerialPortLike)
     this.#port = port
     port.on('data', (data) => this.#handleData(data))
-    port.on('error', (error) => this.#finish(error))
-    port.on('close', () => this.#finish())
-    await openPort(port, signal)
-    await clearSerialControlLines(port)
-    await delay(this.#options.openSettleMilliseconds ?? USB_OPEN_SETTLE_MS, signal)
-    const frame = await this.#exchangeHello(signal)
-    const peer = parseHelloPayload(frame.payload ?? new Uint8Array())
-    if (peer.maxPayload < SPEAKER_FRAME_BYTES_24KHZ) {
-      throw new Error(`CoreS3 max payload ${peer.maxPayload} is smaller than the required 3840 bytes`)
+    port.on('error', (error) => {
+      if (this.#port === port) this.#finish(error)
+    })
+    port.on('close', () => {
+      if (this.#port === port) this.#finish()
+    })
+    try {
+      await openPort(port, signal)
+      await clearSerialControlLines(port)
+      await delay(this.#options.openSettleMilliseconds ?? USB_OPEN_SETTLE_MS, signal)
+      const frame = await this.#exchangeHello(signal)
+      const peer = parseHelloPayload(frame.payload ?? new Uint8Array())
+      if (peer.maxPayload < SPEAKER_FRAME_BYTES_24KHZ) {
+        throw new Error(`CoreS3 max payload ${peer.maxPayload} is smaller than the required 3840 bytes`)
+      }
+      const missing = STACKCHAN_REQUIRED_CAPABILITIES & ~peer.capabilities
+      if (missing !== 0) {
+        throw new Error(`CoreS3 is missing required USB capabilities: 0x${missing.toString(16)}`)
+      }
+      this.#maxPayload = Math.min(STACKCHAN_MAX_PAYLOAD_BYTES, peer.maxPayload)
+      this.#peerCapabilities = peer.capabilities
+      this.#connected = true
+      return capabilitiesFrom(peer.maxPayload, peer.capabilities)
+    } catch (error) {
+      if (this.#port === port) this.#port = undefined
+      this.#connected = false
+      this.#maxPayload = STACKCHAN_MAX_PAYLOAD_BYTES
+      this.#peerCapabilities = 0
+      this.#parser.reset()
+      this.#eventDecoder.reset()
+      await closeSerialPort(port).catch(() => undefined)
+      throw error
     }
-    const missing = STACKCHAN_REQUIRED_CAPABILITIES & ~peer.capabilities
-    if (missing !== 0) throw new Error(`CoreS3 is missing required USB capabilities: 0x${missing.toString(16)}`)
-    this.#maxPayload = Math.min(STACKCHAN_MAX_PAYLOAD_BYTES, peer.maxPayload)
-    this.#peerCapabilities = peer.capabilities
-    this.#connected = true
-    return capabilitiesFrom(peer.maxPayload, peer.capabilities)
   }
 
   async #exchangeHello(signal: AbortSignal): Promise<StackChanFrame> {
@@ -517,7 +534,20 @@ export class UsbStackChanDevice implements StackChanDevice {
   }
 
   #handleData(data: Buffer): void {
-    for (const frame of this.#parser.push(data)) this.#handleFrame(frame)
+    let frames: StackChanFrame[]
+    try {
+      frames = this.#parser.push(data)
+    } catch (error) {
+      console.warn(`USB frame parse failed: ${errorMessage(error)}`)
+      return
+    }
+    for (const frame of frames) {
+      try {
+        this.#handleFrame(frame)
+      } catch (error) {
+        console.warn(`USB frame handling failed: ${errorMessage(error)}`)
+      }
+    }
   }
 
   #handleFrame(frame: StackChanFrame): void {
@@ -544,14 +574,28 @@ export class UsbStackChanDevice implements StackChanDevice {
     if (frame.flags === StackChanControl.SPEAKER_CREDIT) {
       const speaker = this.#speaker
       if (!speaker || frame.streamId !== speaker.streamId) return
-      const increment = parseUint32Payload(frame.payload ?? new Uint8Array())
+      let increment: number
+      try {
+        increment = parseUint32Payload(frame.payload ?? new Uint8Array())
+      } catch (error) {
+        this.#failActiveStreams(
+          new Error(`CoreS3 sent an invalid credit payload: ${errorMessage(error)}`),
+        )
+        return
+      }
       speaker.credit = Math.min(MAX_UNUSED_SPEAKER_CREDIT, speaker.credit + increment)
       for (const waiter of speaker.creditWaiters) waiter.resolve()
       speaker.creditWaiters.clear()
       return
     }
     if (frame.flags === StackChanControl.ERROR) {
-      const code = parseUint32Payload(frame.payload ?? new Uint8Array())
+      const code = (() => {
+        try {
+          return String(parseUint32Payload(frame.payload ?? new Uint8Array()))
+        } catch {
+          return 'unknown'
+        }
+      })()
       this.#failActiveStreams(new Error(`CoreS3 returned error code ${code} for stream ${frame.streamId ?? 0}`))
     }
   }

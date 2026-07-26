@@ -66,6 +66,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val appPreferences = AppPreferences(application)
     private val mcpProfileStore = McpProfileStore(application)
     private val toolRegistry = DeviceToolRegistry(application)
+    private val mcpApprovalLock = Any()
     private var pendingMcpApproval: CompletableDeferred<Boolean>? = null
     private lateinit var realtimeSession: RealtimeSessionController
     private val speechRecognizer = SherpaWhisperRecognizer()
@@ -212,7 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
-            val closeError = runCatching { languageModel.close() }.exceptionOrNull()
+            val closeError = runCatching { languageModel.shutdown() }.exceptionOrNull()
             mutableState.update { state ->
                 if (state.selectedGemmaModel != selectedModel) {
                     state
@@ -345,23 +346,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun resolveMcpApproval(approved: Boolean) {
-        pendingMcpApproval?.complete(approved)
-        pendingMcpApproval = null
+        val pending = synchronized(mcpApprovalLock) {
+            pendingMcpApproval.also { pendingMcpApproval = null }
+        }
+        pending?.complete(approved)
         mutableState.update { it.copy(mcpApprovalRequest = null) }
     }
 
     private suspend fun awaitMcpApproval(request: McpApprovalRequest): Boolean {
-        pendingMcpApproval?.complete(false)
         val response = CompletableDeferred<Boolean>()
-        pendingMcpApproval = response
+        val superseded = synchronized(mcpApprovalLock) {
+            pendingMcpApproval.also { pendingMcpApproval = response }
+        }
+        superseded?.complete(false)
         mutableState.update { it.copy(mcpApprovalRequest = request) }
         return try {
             kotlinx.coroutines.withTimeout(60_000L) { response.await() }
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
             false
         } finally {
-            if (pendingMcpApproval === response) pendingMcpApproval = null
-            mutableState.update { it.copy(mcpApprovalRequest = null) }
+            val removed = synchronized(mcpApprovalLock) {
+                if (pendingMcpApproval === response) {
+                    pendingMcpApproval = null
+                    true
+                } else {
+                    false
+                }
+            }
+            if (removed) mutableState.update { it.copy(mcpApprovalRequest = null) }
         }
     }
 
@@ -498,6 +510,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun restorePreparedAssetsIfAvailable() {
         if (startupAttempted) return
         startupAttempted = true
+        viewModelScope.launch { restorePreparedAssets() }
+    }
+
+    private suspend fun restorePreparedAssets() {
         val selectedModel = mutableState.value.selectedGemmaModel
         val modelAssetsReady = runCatching { modelManager.hasPreparedAssets(selectedModel) }.getOrDefault(false)
         val piperAssetsReady = piperStore.current().isComplete
@@ -639,7 +655,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        pendingMcpApproval?.complete(false)
+        synchronized(mcpApprovalLock) {
+            pendingMcpApproval.also { pendingMcpApproval = null }
+        }?.complete(false)
         realtimeSession.close()
         engine.close()
         serialAudioSource.close()

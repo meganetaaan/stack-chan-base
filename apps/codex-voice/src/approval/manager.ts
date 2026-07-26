@@ -123,9 +123,11 @@ export class ApprovalManager {
   }
 
   async suspendDeviceViews(): Promise<void> {
-    if (!this.#device?.connected) return
+    const device = this.#device
+    if (!device?.connected) return
     for (const pending of this.#pending.values()) {
-      await this.#device.notifyApprovalSuspended(pending.request.id)
+      if (!device.connected) return
+      await device.notifyApprovalSuspended(pending.request.id)
     }
   }
 

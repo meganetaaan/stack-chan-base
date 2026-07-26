@@ -82,23 +82,28 @@ CLIビルドのGradleキャッシュも`.gradle-user-home/`へ分離するため
 セットアップスクリプトはTemurin 17.0.19+10、Android Command-line Tools 14742923、Android SDK 37.0、Build Tools 35.0.0を固定して導入します。
 Android Studioから開く場合は、Gradle JDKに`.toolchains/temurin-17`を指定してください。
 
-## 1. Piper Plus AARを確認する
+## 1. Piper Plus AARを用意する
 
-この作業ディレクトリには、2026年7月14日時点の最新リリースである[Piper Plus v1.13.0](https://github.com/ayutaz/piper-plus/releases/tag/v1.13.0)から生成したAndroid AARを配置済みです。
-公式リリースにはAndroid AARがないため、タグ`v1.13.0`のソースと同リリースworkflowのarm64-v8a成果物からローカルビルドしました。
+`app/libs/piper-plus-release.aar`は再配布条件とサイズを考慮してGit管理していません。
+[Piper Plus v1.13.0](https://github.com/ayutaz/piper-plus/releases/tag/v1.13.0)のソースと同リリースworkflowのarm64-v8a成果物からAARをローカルビルドし、次のインストールスクリプトで配置してください。
+
+```bash
+./scripts/install_piper_aar.sh \
+  /path/to/piper-plus/android/piper-plus/build/outputs/aar/piper-plus-release.aar
+```
 
 ```text
 app/libs/piper-plus-release.aar
 SHA-256: b43d4aeb46af952db7205106dfed68a51bab19fc8343370479a467caf9e3b688
 ```
 
-次のコマンドで配置済みAARを検証できます。
+記録済みの版を用意した場合は、次のコマンドで検証できます。
 
 ```bash
 sha256sum -c app/libs/piper-plus-release.aar.sha256
 ```
 
-AARを差し替える場合は、インストールスクリプトを使います。
+AARを別の場所から導入または差し替える場合も、インストールスクリプトを使います。
 
 ```bash
 cd /path/to/stack-chan-dock/apps/android-local-voice

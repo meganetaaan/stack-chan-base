@@ -56,7 +56,13 @@ class AndroidMicrophoneSource(
         }
 
         recorder = localRecorder
-        localRecorder.startRecording()
+        try {
+            localRecorder.startRecording()
+        } catch (error: Throwable) {
+            release(localRecorder)
+            close(error)
+            return@callbackFlow
+        }
 
         val reader = launch(Dispatchers.IO) {
             try {

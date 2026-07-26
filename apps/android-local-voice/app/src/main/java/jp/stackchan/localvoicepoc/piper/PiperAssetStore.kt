@@ -218,7 +218,7 @@ class PiperAssetStore(context: Context) {
     private fun copyTree(source: DocumentFile, destination: File) {
         source.listFiles().forEach { child ->
             val safeName = child.name?.replace(Regex("[^A-Za-z0-9._-]"), "_")
-                ?.takeIf(String::isNotBlank)
+                ?.takeIf { it.isNotBlank() && it != "." && it != ".." }
                 ?: return@forEach
             val target = File(destination, safeName)
             when {

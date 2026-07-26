@@ -12,6 +12,7 @@ import zipfile
 
 ABI_DIRECTORY = "jni/arm64-v8a"
 PIPER_LIBRARY = f"{ABI_DIRECTORY}/libpiper_plus.so"
+PIPER_JNI_LIBRARY = f"{ABI_DIRECTORY}/libpiper_plus_jni.so"
 ORIGINAL_RUNTIME = f"{ABI_DIRECTORY}/libonnxruntime.so"
 ISOLATED_RUNTIME = f"{ABI_DIRECTORY}/libonnxrtpiper.so"
 ORIGINAL_SONAME = b"libonnxruntime.so"
@@ -64,7 +65,7 @@ def transform(source: Path, destination: Path) -> None:
             isolated_input = ISOLATED_RUNTIME in entries and ORIGINAL_RUNTIME not in entries
             if not raw_input and not isolated_input:
                 fail("AAR must contain exactly one supported Piper ONNX Runtime entry")
-            if PIPER_LIBRARY not in entries or "classes.jar" not in entries:
+            if not {PIPER_LIBRARY, PIPER_JNI_LIBRARY, "classes.jar"}.issubset(entries):
                 fail("AAR is missing Piper Plus classes or its native library")
 
             with tempfile.NamedTemporaryFile(

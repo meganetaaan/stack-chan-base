@@ -11,6 +11,7 @@ class SelectableLanguageModel(
 ) : LocalLanguageModel {
     private val liteRt = LiteRtGemmaLanguageModel(context)
     private val agentsA1 = AgentsA1LanguageModel(context, tools)
+    @Volatile
     private var active: LocalLanguageModel? = null
 
     override val isLoaded: Boolean get() = active?.isLoaded == true
@@ -26,8 +27,7 @@ class SelectableLanguageModel(
             LanguageModelRuntime.LLAMA_CPP -> agentsA1
         }
         if (active !== target) {
-            active?.cancel()
-            active?.close()
+            active?.shutdown()
             active = target
         }
         return target.prepare(modelSpec, modelFile, preference)
@@ -43,6 +43,11 @@ class SelectableLanguageModel(
 
     override suspend fun cancel() {
         active?.cancel()
+    }
+
+    override suspend fun shutdown() {
+        active?.shutdown()
+        active = null
     }
 
     override fun close() {

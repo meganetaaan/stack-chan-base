@@ -6,9 +6,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeout
@@ -178,27 +176,20 @@ class SerialPcmAudioSinkTest {
     }
 
     @Test
-    fun firmwareErrorCancelsTheOwningPlaybackJobWithoutAnotherSinkCall() = runBlocking {
+    fun firmwareErrorIsObservedByFinishWithoutCancellingTheCaller() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL, replenishCredit = false)
         val sink = SerialPcmAudioSink(transport)
-        val endedPromptly = supervisorScope {
-            val playback = async {
-                sink.begin(24_000)
-                sink.write(ShortArray(24_000))
-                awaitCancellation()
-            }
-            withTimeout(1_000) {
-                while (transport.sent.none { it.type == StackChanFrame.Type.SPEAKER_PCM }) yield()
-            }
-            transport.emitError()
-            val failure = withTimeoutOrNull(500) {
-                runCatching { playback.await() }.exceptionOrNull()
-            }
-            if (failure == null) playback.cancelAndJoin()
-            failure is java.io.IOException
+        sink.begin(24_000)
+        sink.write(ShortArray(24_000))
+        withTimeout(1_000) {
+            while (transport.sent.none { it.type == StackChanFrame.Type.SPEAKER_PCM }) yield()
+        }
+        transport.emitError()
+        val failure = withTimeout(500) {
+            runCatching { sink.finish() }.exceptionOrNull()
         }
 
-        assertTrue("Firmware ERROR must terminate the owning playback job", endedPromptly)
+        assertTrue("Firmware ERROR must be reported by finish", failure is java.io.IOException)
         sink.close()
     }
 
@@ -206,18 +197,13 @@ class SerialPcmAudioSinkTest {
     fun firmwareErrorPreservesTheRemoteErrorCode() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL, replenishCredit = false)
         val sink = SerialPcmAudioSink(transport)
-        val failure = supervisorScope {
-            val playback = async {
-                sink.begin(24_000)
-                sink.write(ShortArray(24_000))
-                awaitCancellation()
-            }
-            withTimeout(1_000) {
-                while (transport.sent.none { it.type == StackChanFrame.Type.SPEAKER_PCM }) yield()
-            }
-            transport.emitError(7)
-            withTimeout(500) { runCatching { playback.await() }.exceptionOrNull() }
+        sink.begin(24_000)
+        sink.write(ShortArray(24_000))
+        withTimeout(1_000) {
+            while (transport.sent.none { it.type == StackChanFrame.Type.SPEAKER_PCM }) yield()
         }
+        transport.emitError(7)
+        val failure = withTimeout(500) { runCatching { sink.finish() }.exceptionOrNull() }
 
         assertTrue(failure is StackChanRemoteException)
         assertEquals(7, (failure as StackChanRemoteException).errorCode)
@@ -228,29 +214,27 @@ class SerialPcmAudioSinkTest {
     fun ignoresAnErrorFromAnotherStream() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL, replenishCredit = false)
         val sink = SerialPcmAudioSink(transport)
-        val ignored = supervisorScope {
-            val playback = async {
-                sink.begin(24_000)
-                sink.write(ShortArray(24_000))
-                awaitCancellation()
-            }
-            withTimeout(1_000) {
-                while (transport.sent.none { it.type == StackChanFrame.Type.SPEAKER_PCM }) yield()
-            }
-            val activeStream = transport.sent.first {
-                it.flags == StackChanControl.SPEAKER_START.wireValue
-            }.streamId
+        sink.begin(24_000)
+        sink.write(ShortArray(24_000))
+        withTimeout(1_000) {
+            while (transport.sent.none { it.type == StackChanFrame.Type.SPEAKER_PCM }) yield()
+        }
+        val activeStream = transport.sent.first {
+            it.flags == StackChanControl.SPEAKER_START.wireValue
+        }.streamId
+        val endedByStaleError = supervisorScope {
+            val finish = async { sink.finish() }
             transport.emitError(errorCode = 7, streamId = activeStream xor 1)
-            val endedByStaleError = withTimeoutOrNull(200) {
-                playback.join()
+            val ended = withTimeoutOrNull(200) {
+                finish.join()
                 true
             } ?: false
             transport.emitError(errorCode = 7, streamId = activeStream)
-            runCatching { withTimeout(500) { playback.await() } }
-            endedByStaleError
+            runCatching { withTimeout(500) { finish.await() } }
+            ended
         }
 
-        assertFalse("an ERROR for another stream must be ignored", ignored)
+        assertFalse("an ERROR for another stream must be ignored", endedByStaleError)
         sink.close()
     }
 
@@ -338,7 +322,7 @@ class SerialPcmAudioSinkTest {
                         controlFrame(
                             StackChanControl.SPEAKER_CREDIT,
                             sampleRate,
-                            uint32Payload(minOf(12 * 1_024, sampleRate * 2)),
+                            uint32Payload(minOf(8 * 1_024, sampleRate * 2)),
                             streamId,
                         ),
                     )

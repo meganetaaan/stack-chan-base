@@ -40,6 +40,7 @@ class SerialPcmAudioSink(
     private val creditChanged = Channel<Unit>(Channel.CONFLATED)
 
     private var collector: Job? = null
+    private var sessionSupervisor: Job? = null
     private var pendingAbort: Job? = null
     private var outbound: Channel<SpeakerItem>? = null
     private var sender: Deferred<Unit>? = null
@@ -90,7 +91,9 @@ class SerialPcmAudioSink(
         speakerTextSupported = ready.capabilities and StackChanCapabilities.SPEAKER_TEXT != 0
         traceWriteSession = traceSession
         connection.setWriteObserver(::recordUsbWrite)
-        val sessionScope = CoroutineScope(currentCoroutineContext())
+        val supervisor = SupervisorJob(currentCoroutineContext()[Job])
+        sessionSupervisor = supervisor
+        val sessionScope = CoroutineScope(currentCoroutineContext() + supervisor)
         collector = sessionScope.launch(start = CoroutineStart.UNDISPATCHED) {
             connection.frames.collect { frame -> handleFrame(frame) }
         }
@@ -292,7 +295,9 @@ class SerialPcmAudioSink(
                     return
                 }
                 val accepted = creditMutex.withLock {
-                    if (credit !in 1..speakerCapacityBytes || availableCredit > speakerCapacityBytes - credit) {
+                    if (credit !in 1..MAX_UNUSED_SPEAKER_CREDIT_BYTES ||
+                        availableCredit > MAX_UNUSED_SPEAKER_CREDIT_BYTES - credit
+                    ) {
                         false
                     } else {
                         availableCredit += credit
@@ -468,6 +473,8 @@ class SerialPcmAudioSink(
     }
 
     private fun cleanup() {
+        sessionSupervisor?.cancel()
+        sessionSupervisor = null
         connection.setWriteObserver(null)
         traceWriteSession = null
         outbound?.cancel()
@@ -490,7 +497,9 @@ class SerialPcmAudioSink(
         usbWriteCount = 0
         previousUsbWriteStartedNanos = null
         previousUsbWriteCompletedNanos = null
-        while (creditChanged.tryReceive().isSuccess) Unit
+        while (creditChanged.tryReceive().isSuccess) {
+            // Drain stale notifications before the next speaker session.
+        }
     }
 
     override fun close() {
@@ -520,12 +529,10 @@ class SerialPcmAudioSink(
     private val defaultFrameBytes: Int
         get() = outputSampleRate * 2 * FRAME_MILLISECONDS / 1_000
 
-    private val speakerCapacityBytes: Int
-        get() = outputSampleRate * 2
-
     companion object {
         const val DEFAULT_OUTPUT_SAMPLE_RATE = 24_000
         val SUPPORTED_OUTPUT_SAMPLE_RATES = setOf(8_000, 16_000, 24_000)
+        private const val MAX_UNUSED_SPEAKER_CREDIT_BYTES = 8 * 1024
         private const val FRAME_MILLISECONDS = 80
         private const val OUTBOUND_QUEUE_ITEMS = 5_000 / FRAME_MILLISECONDS
         private const val MAX_CAPTION_BYTES = 1_024

@@ -7,12 +7,12 @@
       "frame": {
         "type": 2,
         "flags": 32,
-        "streamId": 0,
+        "streamId": 1,
         "sequence": 42,
         "sampleRate": 24000,
         "payloadHex": "01020304"
       },
-      "encodedHex": "43530202200000002a000000c05d000004000000010203044304066c"
+      "encodedHex": "43530202200001002a000000c05d00000400000001020304a2b25483"
     },
     {
       "name": "speaker-frame-with-stream-id",

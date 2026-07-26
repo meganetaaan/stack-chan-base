@@ -31,6 +31,7 @@ class MainUiStateFlowTest {
         assertFalse(ready.copy(usbStatus = UsbConnectionStatus.DISCONNECTED).pipelineReady)
         assertFalse(ready.copy(piperLoaded = false).pipelineReady)
         assertFalse(ready.copy(modelsReady = false).pipelineReady)
+        assertFalse(ready.copy(sdkStatus = SdkBootstrap.Status.Starting).pipelineReady)
     }
 
     @Test

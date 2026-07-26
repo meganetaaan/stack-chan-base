@@ -4,6 +4,7 @@ import type { RtpPacket } from 'werift'
 import {
   OpusRtpAudioDecoder,
   OpusRtpAudioSender,
+  opusPayloadTypeFromSdp,
   Pcm16FrameBuffer,
   WEBRTC_AUDIO_FRAME_MILLISECONDS,
   WEBRTC_AUDIO_FRAME_SAMPLES,
@@ -94,4 +95,25 @@ test('Opus RTP sender frames 16 kHz microphone PCM and decoder returns 48 kHz mo
   assert.equal(decoded.channels, 1)
   assert.equal(decoded.format, 's16le')
   assert.equal(decoded.data.byteLength, WEBRTC_AUDIO_FRAME_SAMPLES * 2)
+})
+
+test('Opus RTP sender uses the payload type negotiated in the answer SDP', () => {
+  const packets: RtpPacket[] = []
+  const scheduler = new ManualScheduler()
+  const payloadType = opusPayloadTypeFromSdp(
+    'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 109\r\na=rtpmap:109 opus/48000/2\r\n',
+  )
+  const sender = new OpusRtpAudioSender({
+    writeRtp(packet) {
+      if (Buffer.isBuffer(packet)) throw new Error('sender unexpectedly wrote serialized RTP')
+      packets.push(packet)
+    },
+  }, { scheduler, payloadType })
+
+  sender.start()
+  scheduler.advance(WEBRTC_AUDIO_FRAME_MILLISECONDS)
+  sender.stop()
+
+  assert.equal(packets[0]?.header.payloadType, 109)
+  assert.equal(opusPayloadTypeFromSdp('v=0\r\n'), 111)
 })

@@ -48,6 +48,7 @@ if [[ ! -x "$JAVA_HOME/bin/java" ]]; then
   download "$JDK_URL" "$JDK_ARCHIVE"
   verify_sha256 "$JDK_SHA256" "$JDK_ARCHIVE" || {
     echo "JDK checksum verification failed: $JDK_ARCHIVE" >&2
+    rm -f "$JDK_ARCHIVE"
     exit 1
   }
   rm -rf "$JAVA_HOME"
@@ -64,9 +65,11 @@ if [[ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
   download "$ANDROID_TOOLS_URL" "$ANDROID_TOOLS_ARCHIVE"
   verify_sha256 "$ANDROID_TOOLS_SHA256" "$ANDROID_TOOLS_ARCHIVE" || {
     echo "Android command-line tools checksum verification failed: $ANDROID_TOOLS_ARCHIVE" >&2
+    rm -f "$ANDROID_TOOLS_ARCHIVE"
     exit 1
   }
   rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+  rm -rf "$TOOLCHAINS_DIR/android-command-line-tools"
   mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
   unzip -q "$ANDROID_TOOLS_ARCHIVE" -d "$TOOLCHAINS_DIR/android-command-line-tools"
   cp -a "$TOOLCHAINS_DIR/android-command-line-tools/cmdline-tools/." \

@@ -19,8 +19,10 @@ class ModelSetupManager(
     private val legacyModels = LegacyModelCleaner(context)
     private val speechModels = RunAnywhereSpeechModelManager(speechRecognizer)
 
-    fun hasPreparedAssets(modelSpec: GemmaModelSpec): Boolean =
-        GemmaModelStore(appContext, modelSpec).isPrepared() && speechModels.isPrepared()
+    suspend fun hasPreparedAssets(modelSpec: GemmaModelSpec): Boolean =
+        withContext(Dispatchers.IO) {
+            GemmaModelStore(appContext, modelSpec).isPrepared() && speechModels.isPrepared()
+        }
 
     suspend fun prepareAll(
         modelSpec: GemmaModelSpec,

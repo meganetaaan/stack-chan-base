@@ -49,8 +49,9 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: async (): Promise<IteratorResult<T>> => {
-        const value = this.#values.shift()
-        if (value !== undefined) return { value, done: false }
+        if (this.#values.length > 0) {
+          return { value: this.#values.shift()!, done: false }
+        }
         if (this.#error !== undefined) throw this.#error
         if (this.#closed) return { value: undefined, done: true }
         const waiter = new Deferred<IteratorResult<T>>()

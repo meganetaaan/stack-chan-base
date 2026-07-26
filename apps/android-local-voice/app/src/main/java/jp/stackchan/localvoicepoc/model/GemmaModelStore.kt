@@ -95,7 +95,7 @@ class GemmaModelStore(
         val requiredBytes = modelSpec.expectedBytes - downloadedBytes + FREE_SPACE_MARGIN_BYTES
         val storageUuid = storageManager.getUuidForPath(modelDirectory)
         val allocatableBytes = storageManager.getAllocatableBytes(storageUuid)
-        if (allocatableBytes in 1 until requiredBytes) {
+        if (allocatableBytes in 0 until requiredBytes) {
             val requiredGiB = requiredBytes.toDouble() / GIBIBYTE
             val availableGiB = allocatableBytes.toDouble() / GIBIBYTE
             error(
@@ -108,7 +108,7 @@ class GemmaModelStore(
                     ),
             )
         }
-        if (modelDirectory.usableSpace in 1 until requiredBytes) {
+        if (modelDirectory.usableSpace in 0 until requiredBytes) {
             runCatching { storageManager.allocateBytes(storageUuid, requiredBytes) }
                 .getOrElse { error ->
                     throw IllegalStateException(

@@ -31,6 +31,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 data class McpServerRequest(
     val serverLabel: String,
@@ -56,7 +57,7 @@ class RealtimeSessionController(
     private val json = Json { ignoreUnknownKeys = true }
     private val encoder = StackChanEventEncoder()
     private val decoder = StackChanEventDecoder()
-    private val pendingFunctions = mutableMapOf<String, CompletableDeferred<String>>()
+    private val pendingFunctions = ConcurrentHashMap<String, CompletableDeferred<String>>()
     private var instructionOverlay = ""
     private var remoteDefinitions: List<ToolDefinition> = emptyList()
     private var eventJob: Job? = null

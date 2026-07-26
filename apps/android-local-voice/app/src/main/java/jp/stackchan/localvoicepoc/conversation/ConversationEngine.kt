@@ -30,6 +30,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.ArrayDeque
@@ -102,13 +103,18 @@ class ConversationEngine(
                 mutableEvents.emit(
                     ConversationEvent.Failure(error.message ?: error::class.java.simpleName, error),
                 )
+            } finally {
+                audioSource.stop()
+                withContext(NonCancellable) {
+                    emitPhase(ConversationPhase.IDLE)
+                }
+                pushToTalkJob = null
             }
         }
     }
 
     fun stopPushToTalkAndProcess() {
         val recordingJob = pushToTalkJob ?: return
-        pushToTalkJob = null
         audioSource.stop()
 
         sessionJob = scope.launch {
@@ -311,7 +317,7 @@ class ConversationEngine(
     }
 
     override fun close() {
-        audioSource.stop()
+        runBlocking { stop() }
         if (detector.isInitialized()) detector.value.close()
         speechRecognizer.close()
         languageModel.close()

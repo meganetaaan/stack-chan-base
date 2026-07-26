@@ -24,7 +24,7 @@ class AndroidPcmAudioSink : PcmAudioSink {
             )
             require(minimum > 0) { "Unsupported AudioTrack configuration: $minimum" }
 
-            track = AudioTrack.Builder()
+            val created = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ASSISTANT)
@@ -41,14 +41,18 @@ class AndroidPcmAudioSink : PcmAudioSink {
                 .setBufferSizeInBytes(maxOf(minimum * 2, sampleRate))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
-                .also { created ->
-                    check(created.state == AudioTrack.STATE_INITIALIZED) {
-                        "AudioTrack could not be initialized"
-                    }
-                    framesWritten = 0L
-                    this@AndroidPcmAudioSink.sampleRate = sampleRate
-                    created.play()
+            try {
+                check(created.state == AudioTrack.STATE_INITIALIZED) {
+                    "AudioTrack could not be initialized"
                 }
+                created.play()
+                track = created
+                framesWritten = 0L
+                this@AndroidPcmAudioSink.sampleRate = sampleRate
+            } catch (error: Throwable) {
+                runCatching { created.release() }
+                throw error
+            }
         }
     }
 

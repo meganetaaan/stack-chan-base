@@ -13,7 +13,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "postinstall": "node scripts/patch-werift-consent.mjs",
@@ -26,7 +26,8 @@
     "test": "npm run test:node && npm run test:vitest",
     "test:node": "npm run build && node --test \"dist/**/*.test.js\"",
     "test:vitest": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "audit:release": "node scripts/check-release-audit.mjs"
   },
   "dependencies": {
     "@discordjs/opus": "^0.10.0",

@@ -16,7 +16,7 @@ data class ChatMessage(
 }
 
 data class ComponentProgress(
-    val stage: String = "not prepared",
+    val stage: String = "未準備",
     val fraction: Float = 0f,
 )
 

@@ -64,4 +64,16 @@ C++のlibwebrtcを直接組み込む案は、SDP、ICE、DTLS、SRTP、Opus、�
 現行lockfileに対する`npm audit --omit=dev`は、high 9件とcritical 1件を報告します。
 主な経路は`@discordjs/opus`からインストール補助用`@discordjs/node-pre-gyp`を経由する`tar`などと、`werift`から`werift-ice`を経由する`ip`です。
 監査が提示する自動修正は直接依存の互換性を損なうdowngradeを含むため、適用していません。
-個々の到達可能性は未評価であり、Opus実装またはWebRTC実装の更新時に別途解消する必要があります。
+`tar`系はネイティブOpusのインストール時にだけ到達し、dock appの実行時にarchiveを処理しません。
+`ip`はICEのローカルアドレス分類に使われますが、修正版が公開されておらず、`werift`の互換性を保ったまま置換できません。
+この判断は脆弱性の解消ではなく、2026-07-26時点の期限付きwaiverであり、Opus実装またはWebRTC実装の更新時に再評価します。
+
+リリース検査は次を実行します。
+
+```bash
+npm run audit:release
+```
+
+既定では既知の警告を含めて失敗します。
+リリース責任者が上記の到達可能性と配布対象を確認して例外を承認した場合だけ、`STACKCHAN_DEPENDENCY_WAIVER=codex-voice-2026-07-26`を設定して再実行します。
+検査スクリプトは許可したpackage名とadvisory IDを固定しており、新しい警告またはadvisoryが加わった場合はwaiverを指定しても失敗します。

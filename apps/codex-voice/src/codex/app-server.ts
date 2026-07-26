@@ -142,8 +142,9 @@ export class CodexAppServer extends EventEmitter {
       throw new NonRetryableError('configuration', 'WebRTC offer SDP must not be empty')
     }
     const answer = new Deferred<string>()
+    const threadId = this.threadId
     const onNotification = (notification: RpcNotification) => {
-      if (!isRecord(notification.params) || notification.params.threadId !== this.threadId) return
+      if (!isRecord(notification.params) || notification.params.threadId !== threadId) return
       if (notification.method === 'thread/realtime/sdp') {
         if (typeof notification.params.sdp === 'string' && notification.params.sdp.trim().length > 0) {
           answer.resolve(notification.params.sdp)
@@ -180,7 +181,7 @@ export class CodexAppServer extends EventEmitter {
       timeoutMilliseconds,
     )
     const params: Record<string, unknown> = {
-      threadId: this.threadId,
+      threadId,
       outputModality: 'audio',
       includeStartupContext: true,
       version: 'v3',

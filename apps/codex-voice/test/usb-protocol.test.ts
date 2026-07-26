@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   decodeStackChanFrame,
   encodeStackChanFrame,
@@ -43,9 +44,13 @@ type ContractVectors = {
   invalidFrames: InvalidContractFrameVector[]
 }
 
-const contractVectors = JSON.parse(
-  readFileSync(resolve(process.cwd(), '../../contracts/usb-cdc-v2/test-vectors.json'), 'utf8'),
-) as ContractVectors
+const testDirectory = dirname(fileURLToPath(import.meta.url))
+const contractVectorPath = [
+  resolve(testDirectory, '../../../contracts/usb-cdc-v2/test-vectors.json'),
+  resolve(testDirectory, '../../../../contracts/usb-cdc-v2/test-vectors.json'),
+].find(existsSync)
+if (!contractVectorPath) throw new Error('shared USB CDC contract vectors were not found')
+const contractVectors = JSON.parse(readFileSync(contractVectorPath, 'utf8')) as ContractVectors
 
 function fromHex(value: string): Uint8Array {
   return Uint8Array.from(Buffer.from(value, 'hex'))

@@ -94,3 +94,14 @@ test('app-server initialization opts into experimental APIs without attestation 
   )
   assert.equal(await realtimeStarted, 'v=0\r\no=codex-answer\r\n')
 })
+
+test('realtime startup without an open thread does not register negotiation resources', async () => {
+  const rpc = new JsonLineRpcConnection(new PassThrough(), new PassThrough())
+  const appServer = new CodexAppServer(rpc)
+
+  await assert.rejects(
+    appServer.startRealtime({ sdp: 'v=0\r\n', sdpTimeoutMilliseconds: 10 }),
+    /thread has not been opened/,
+  )
+  assert.equal(appServer.listenerCount('notification'), 0)
+})
