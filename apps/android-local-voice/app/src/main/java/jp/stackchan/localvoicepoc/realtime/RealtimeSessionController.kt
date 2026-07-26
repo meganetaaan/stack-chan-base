@@ -1,26 +1,26 @@
 package jp.stackchan.localvoicepoc.realtime
 
 import jp.stackchan.localvoicepoc.model.DeviceToolCall
-import jp.stackchan.localvoicepoc.model.DeviceToolRegistry
+import jp.stackchan.localvoicepoc.model.RemoteToolRegistry
 import jp.stackchan.localvoicepoc.model.ToolDefinition
 import jp.stackchan.localvoicepoc.model.ToolExecutor
 import jp.stackchan.localvoicepoc.serial.StackChanEventDecoder
 import jp.stackchan.localvoicepoc.serial.StackChanEventEncoder
+import jp.stackchan.localvoicepoc.serial.StackChanCapabilities
 import jp.stackchan.localvoicepoc.serial.StackChanFrame
 import jp.stackchan.localvoicepoc.serial.StackChanUsbState
 import jp.stackchan.localvoicepoc.serial.StackChanUsbTransport
+import jp.stackchan.localvoicepoc.serial.hasStackChanCapability
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -31,7 +31,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 data class McpServerRequest(
     val serverLabel: String,
@@ -50,14 +49,23 @@ interface McpToolProvider {
 
 class RealtimeSessionController(
     private val transport: StackChanUsbTransport,
-    private val registry: DeviceToolRegistry,
+    private val registry: RemoteToolRegistry,
     private val mcp: McpToolProvider,
+    private val conversationCommands: ConversationCommandHandler,
     private val scope: CoroutineScope,
 ) : AutoCloseable {
-    private val json = Json { ignoreUnknownKeys = true }
+    private data class CachedConversationResult(
+        val operation: ConversationOperation,
+        val result: ConversationCommandResult,
+    )
+
     private val encoder = StackChanEventEncoder()
     private val decoder = StackChanEventDecoder()
-    private val pendingFunctions = ConcurrentHashMap<String, CompletableDeferred<String>>()
+    private val pendingFunctionsLock = Any()
+    private val pendingFunctions = mutableMapOf<String, CompletableDeferred<String>>()
+    private val conversationResults = LinkedHashMap<String, CachedConversationResult>()
+    private var remoteFunctionsAvailable = false
+    private var controllerClosed = false
     private var instructionOverlay = ""
     private var remoteDefinitions: List<ToolDefinition> = emptyList()
     private var eventJob: Job? = null
@@ -68,19 +76,32 @@ class RealtimeSessionController(
         mcp.setLifecycleSink(::sendMcpLifecycle)
         eventJob = scope.launch {
             transport.frames.collect { frame ->
-                if (frame.type == StackChanFrame.Type.EVENT) {
-                    runCatching { decoder.push(frame) }
-                        .onSuccess { payload -> payload?.let { handleEvent(it) } }
-                        .onFailure { sendError(null, "invalid_event", it.message ?: "EVENTを解析できません") }
-                }
+                if (frame.type == StackChanFrame.Type.EVENT) handleEventFrame(frame)
             }
         }
         stateJob = scope.launch {
             transport.state.collect { state ->
-                if (state is StackChanUsbState.Ready) {
-                    sendSessionEvent("session.created")
+                if (
+                    state is StackChanUsbState.Ready &&
+                    state.capabilities.hasStackChanCapability(StackChanCapabilities.EVENT)
+                ) {
+                    if (activateRemoteFunctions()) {
+                        try {
+                            sendSessionEvent("session.created")
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Throwable) {
+                            // Keep observing state so a reconnect can announce the next session.
+                        }
+                    }
                 } else {
-                    resetSession("USB接続が切断されました")
+                    resetSession(
+                        if (state is StackChanUsbState.Ready) {
+                            "接続先はEVENTに対応していません"
+                        } else {
+                            "USB接続が切断されました"
+                        },
+                    )
                 }
             }
         }
@@ -88,14 +109,73 @@ class RealtimeSessionController(
 
     val instructions: String get() = instructionOverlay
 
-    private suspend fun handleEvent(payload: String) {
-        val root = json.parseToJsonElement(payload).jsonObject
+    private suspend fun handleEventFrame(frame: StackChanFrame) {
+        val ready = transport.state.value as? StackChanUsbState.Ready ?: return
+        if (!ready.capabilities.hasStackChanCapability(StackChanCapabilities.EVENT)) return
+        try {
+            decoder.push(frame)?.let { payload ->
+                when (val routed = StackChanApplicationEventCodec.route(payload)) {
+                    is RoutedStackChanEvent.RawRealtime -> handleRealtimeEvent(routed.value)
+                    is RoutedStackChanEvent.Conversation -> handleConversationRequest(routed.request)
+                    RoutedStackChanEvent.Malformed,
+                    RoutedStackChanEvent.UnsupportedApplication,
+                    -> Unit
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            runCatching {
+                sendError(null, "invalid_event", error.message ?: "EVENTを解析できません")
+            }
+        }
+    }
+
+    private suspend fun handleRealtimeEvent(root: JsonObject) {
         val eventId = root.string("event_id")
         when (root.requiredString("type")) {
             "session.update" -> applySessionUpdate(root, eventId)
             "conversation.item.create" -> acceptConversationItem(root, eventId)
             "response.create" -> Unit
             else -> sendError(eventId, "invalid_request", "未対応のイベントです")
+        }
+    }
+
+    private suspend fun handleConversationRequest(request: ConversationRequest) {
+        val cached = conversationResults[request.requestId]
+        val result = when {
+            cached == null -> executeConversationRequest(request).also {
+                rememberConversationResult(request, it)
+            }
+            cached.operation == request.operation -> cached.result
+            else -> ConversationCommandResult(
+                success = false,
+                state = RemoteConversationState.BLOCKED,
+                error = "requestIdが異なる会話操作に再利用されました",
+            )
+        }
+        send(StackChanApplicationEventCodec.conversationResult(request.requestId, result))
+    }
+
+    private suspend fun executeConversationRequest(request: ConversationRequest): ConversationCommandResult = try {
+        when (request.operation) {
+            ConversationOperation.START -> conversationCommands.start()
+            ConversationOperation.STOP -> conversationCommands.stop()
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        ConversationCommandResult(
+            success = false,
+            state = RemoteConversationState.BLOCKED,
+            error = error.message ?: error::class.java.simpleName,
+        )
+    }
+
+    private fun rememberConversationResult(request: ConversationRequest, result: ConversationCommandResult) {
+        conversationResults[request.requestId] = CachedConversationResult(request.operation, result)
+        while (conversationResults.size > CONVERSATION_RESULT_CACHE_SIZE) {
+            conversationResults.remove(conversationResults.keys.first())
         }
     }
 
@@ -165,7 +245,12 @@ class RealtimeSessionController(
         val itemId = UUID.randomUUID().toString()
         val responseId = UUID.randomUUID().toString()
         val result = CompletableDeferred<String>()
-        pendingFunctions[callId] = result
+        synchronized(pendingFunctionsLock) {
+            check(remoteFunctionsAvailable && !controllerClosed) {
+                "Realtimeセッションは利用できません"
+            }
+            pendingFunctions[callId] = result
+        }
         send(buildJsonObject {
             put("type", "response.output_item.added")
             put("response_id", responseId)
@@ -202,7 +287,9 @@ class RealtimeSessionController(
         return try {
             withTimeout(FUNCTION_TIMEOUT_MS) { result.await() }
         } finally {
-            pendingFunctions.remove(callId)
+            synchronized(pendingFunctionsLock) {
+                pendingFunctions.remove(callId)
+            }
         }
     }
 
@@ -215,9 +302,12 @@ class RealtimeSessionController(
         val output = item["output"]?.let {
             if (it is JsonPrimitive && it.isString) it.content else it.toString()
         } ?: ""
-        val pending = pendingFunctions[callId]
-            ?: return sendError(eventId, "unknown_call_id", "対応するfunction callがありません")
-        pending.complete(output)
+        val completed = synchronized(pendingFunctionsLock) {
+            pendingFunctions[callId]?.complete(output) == true
+        }
+        if (!completed) {
+            return sendError(eventId, "unknown_call_id", "対応するfunction callがありません")
+        }
         send(buildJsonObject {
             put("type", "conversation.item.created")
             eventId?.let { put("event_id", it) }
@@ -271,15 +361,29 @@ class RealtimeSessionController(
 
     private suspend fun send(value: JsonObject) {
         val ready = transport.state.value as? StackChanUsbState.Ready ?: return
+        if (!ready.capabilities.hasStackChanCapability(StackChanCapabilities.EVENT)) return
         withContext(Dispatchers.IO) {
             encoder.encode(value.toString(), ready.maxPayload).forEach { transport.send(it) }
         }
     }
 
-    private fun resetSession(reason: String) {
+    private fun activateRemoteFunctions(): Boolean = synchronized(pendingFunctionsLock) {
+        if (controllerClosed) {
+            false
+        } else {
+            remoteFunctionsAvailable = true
+            true
+        }
+    }
+
+    private fun resetSession(reason: String, closing: Boolean = false) {
+        val functionsToFail = synchronized(pendingFunctionsLock) {
+            remoteFunctionsAvailable = false
+            if (closing) controllerClosed = true
+            pendingFunctions.values.toList().also { pendingFunctions.clear() }
+        }
+        functionsToFail.forEach { it.completeExceptionally(IllegalStateException(reason)) }
         decoder.reset()
-        pendingFunctions.values.forEach { it.completeExceptionally(IllegalStateException(reason)) }
-        pendingFunctions.clear()
         instructionOverlay = ""
         remoteDefinitions = emptyList()
         registry.clearRemoteTools()
@@ -289,7 +393,8 @@ class RealtimeSessionController(
     override fun close() {
         eventJob?.cancel()
         stateJob?.cancel()
-        resetSession("セッションを終了しました")
+        resetSession("セッションを終了しました", closing = true)
+        conversationResults.clear()
     }
 
     private fun JsonObject.string(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull
@@ -301,5 +406,6 @@ class RealtimeSessionController(
 
     private companion object {
         const val FUNCTION_TIMEOUT_MS = 30_000L
+        const val CONVERSATION_RESULT_CACHE_SIZE = 64
     }
 }

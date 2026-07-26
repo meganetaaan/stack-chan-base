@@ -7,6 +7,34 @@ import {
   STACKCHAN_EVENT_SCHEMA,
   truncateUtf8,
 } from '../src/usb/events.js'
+import { loadContractFixture } from './contract-fixtures.js'
+
+type ApplicationEventVector = {
+  name: string
+  codexParserAccepted: boolean
+  value: Record<string, unknown>
+}
+
+type ApplicationEventFixture = {
+  schema: string
+  applicationSchema: string
+  vectors: ApplicationEventVector[]
+}
+
+const applicationEventFixture =
+  loadContractFixture<ApplicationEventFixture>('application-event-vectors.json')
+
+test('shared application event vectors match the Codex parser', () => {
+  assert.equal(applicationEventFixture.schema, 'stackchan.application-event.vectors.v1')
+  assert.equal(applicationEventFixture.applicationSchema, STACKCHAN_EVENT_SCHEMA)
+  for (const vector of applicationEventFixture.vectors) {
+    assert.equal(
+      parseStackChanApplicationEvent(JSON.stringify(vector.value)) !== undefined,
+      vector.codexParserAccepted,
+      vector.name,
+    )
+  }
+})
 
 test('approval request event round-trips through JSON', () => {
   const event = approvalRequestEvent({

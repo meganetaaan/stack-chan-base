@@ -5,7 +5,14 @@
 Android側は`usb-serial-for-android`、Codex音声ブリッジはNode.jsの`serialport`でVID `0x303A`、PID `0x1001`のCDCポートを開く。
 通信速度の設定値は115,200 baudだが、実際の転送はUSB CDCで行われる。
 
-言語ごとのcodecは独立して実装し、共通の[`test-vectors.json`](test-vectors.json)でwire bytesの一致を検査する。
+言語ごとのcodecは独立して実装し、次のversion付き共通fixtureで一致を検査する。
+
+- [`test-vectors.json`](test-vectors.json)：frameのwire bytes、CRC、破損frame
+- [`negotiation-vectors.json`](negotiation-vectors.json)：HELLO payloadとcapability交渉
+- [`application-event-vectors.json`](application-event-vectors.json)：共通eventとraw Realtime eventの振り分け
+
+外部リポジトリへfixtureをvendorする場合は、内容を変更せず、取得元のDock commitとfixtureのSHA-256を記録する。
+Dock自身の文書へ自己参照するcommit hashは埋め込まず、fixtureの`schema`と`protocolVersion`で形式versionを識別する。
 
 ## 音声形式
 
@@ -62,9 +69,11 @@ Firmwareは同じ形式の`HELLO_ACK`を返す。
 USBホストはマイク、スピーカー、credit、24 kHz出力のcapabilityを確認して`READY`へ遷移する。
 USBホストはさらにcapability bit 9のstream ID対応を必須として確認する。
 
-Codex音声ブリッジは、上記に加えてcapability bit 10の`EVENT`対応を必須として確認する。
-Firmwareはpeerがbit 10を広告した場合だけ`EVENT`を送信する。
-このnegotiationにより、`EVENT`を解釈しない既存のAndroid dock appへFirmwareから未知のframe typeが送られることを防ぐ。
+Android dock appとCodex音声ブリッジはcapability bit 10の`EVENT`を広告する。
+Codex音声ブリッジはEVENTを必須として接続時に確認するが、Android dock appはEVENT非対応peerとも音声機能だけで接続できる。
+各送信側はpeerがEVENTを広告した場合だけEVENTを送る。
+会話操作のように双方向応答を必要とする機能は、dock appとFirmwareの双方がEVENTを広告した場合だけ利用できる。
+このnegotiationにより、EVENTを解釈しない旧実装へ未知のframe typeを送らない。
 
 録音は`MIC_START`、`MIC_STARTED`、`MICROPHONE_PCM`、`MIC_STOP`、`MIC_STOPPED`の順で制御する。
 USBホストは`MIC_STOPPED`を受信するまで、同じstream ID、sample rate、空payloadの`MIC_STOP`を500ミリ秒間隔で再送できる。
@@ -99,6 +108,8 @@ payloadはUTF-8 JSONとし、一つのeventは最大64 KiBとする。
 - sequence欠落、不正なUTF-8、64 KiB超過はevent全体を破棄する。音声sessionには適用しない。
 
 Stack-chan共通eventはトップレベルに`schema: "stackchan.event.v1"`、`type`、opaqueな`requestId`を持つ。
+このschemaを持つ未知または不正なeventを、schemaのないraw Realtime eventとして処理してはならない。
+壊れたJSONまたは不正なapplication eventはそのeventだけを破棄し、後続eventの受信を継続する。
 Codex app-server固有のJSON-RPC payloadをそのままFirmwareへ転送してはならない。
 Codex音声ブリッジは、コマンド実行とファイル変更を次の共通eventへ正規化する。
 
@@ -127,6 +138,8 @@ Codex音声ブリッジは、コマンド実行とファイル変更を次の共
 
 停止要求は`type="conversation.stop"`、`gesture="backwardSwipe"`とする。
 開始と停止はtoggleとして解釈せず、明示された操作だけを適用する。
+Android dock appは待機中の開始要求を自動会話モードへの切替として処理し、Push-to-Talk実行中の開始要求を拒否する。
+停止要求はAndroidの会話モードにかかわらず冪等に処理する。
 
 dock appは次の形で結果を返す。
 
@@ -199,6 +212,7 @@ PC側はPCM本体を無音で再生成し、記録されたwrite境界と`starte
 4. Push-to-Talkで録音し、CoreS3のマイク入力とスピーカー出力を確認する。
 5. ケーブルを抜き、会話が待機状態へ戻ることを確認する。
 6. 再接続後に「USB接続を再試行」を押し、再び接続済みになることを確認する。
+7. 頭上センサの前方スワイプでAndroidが自動会話を開始し、後方スワイプで停止することを確認する。
 
 応答がない場合は、Firmwareが専用manifestで書き込まれていることと、データ通信対応ケーブルであることを確認する。
 CoreS3のUSB Serial/JTAGポートをxsbugと音声通信で同時利用しない。

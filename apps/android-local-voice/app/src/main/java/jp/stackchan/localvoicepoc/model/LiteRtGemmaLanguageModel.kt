@@ -17,15 +17,19 @@ import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Gemma 4 adapter implemented against the public LiteRT-LM API. */
 @OptIn(ExperimentalApi::class)
@@ -35,6 +39,8 @@ class LiteRtGemmaLanguageModel(
 ) : LocalLanguageModel {
     private val applicationContext = context.applicationContext
     private val operationMutex = Mutex()
+    private val cleanupScope = CoroutineScope(SupervisorJob() + inferenceDispatcher)
+    private val closed = AtomicBoolean(false)
 
     @Volatile
     private var activeEngine: Engine? = null
@@ -55,7 +61,7 @@ class LiteRtGemmaLanguageModel(
         private set
 
     override val isLoaded: Boolean
-        get() = activeEngine?.isInitialized() == true
+        get() = !closed.get() && activeEngine?.isInitialized() == true
 
     override suspend fun prepare(
         modelSpec: LanguageModelSpec,
@@ -64,6 +70,7 @@ class LiteRtGemmaLanguageModel(
     ): LanguageModelBackend =
         withContext(inferenceDispatcher) {
             operationMutex.withLock {
+                check(!closed.get()) { "Gemma 4は終了済みです" }
                 require(modelFile.isFile && modelFile.length() > 0L) {
                     "Gemma 4モデルが見つかりません: ${modelFile.absolutePath}"
                 }
@@ -123,6 +130,7 @@ class LiteRtGemmaLanguageModel(
 
     override fun generate(request: GenerationRequest): Flow<String> = flow {
         operationMutex.withLock {
+            check(!closed.get()) { "Gemma 4は終了済みです" }
             val engine = checkNotNull(activeEngine) { "Gemma 4がロードされていません" }
             check(engine.isInitialized()) { "LiteRT-LMエンジンが初期化されていません" }
 
@@ -176,15 +184,14 @@ class LiteRtGemmaLanguageModel(
     }
 
     override fun close() {
+        if (!closed.compareAndSet(false, true)) return
         cancelRequested = true
         runCatching { generatingConversation?.cancelProcess() }
-        if (operationMutex.tryLock()) {
-            try {
+        cleanupScope.launch {
+            operationMutex.withLock {
                 closeConversation()
                 closeEngine()
                 ExperimentalFlags.enableSpeculativeDecoding = null
-            } finally {
-                operationMutex.unlock()
             }
         }
     }

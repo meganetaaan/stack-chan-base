@@ -66,9 +66,11 @@ Gemmaのthinkingは、LiteRT-LMのテンプレートコンテキスト`enable_th
 会話制御にはGemma固有のプロンプト記法を置きません。
 Agents A1ではthinkingを無効にし、Android組み込みツール、ｽﾀｯｸﾁｬﾝfunction、MCPツールを合計2回まで実行します。
 
-USB接続後、Androidは`session.created`を送信します。
+USB接続後、AndroidとFirmwareの双方がEVENT capabilityを広告した場合だけ、Androidは`session.created`を送信します。
 ｽﾀｯｸﾁｬﾝは`session.update`でinstructionsとtool定義を更新し、Androidは有効な全ツールを`session.updated`で返します。
 制御イベントはUSBのEVENTフレームでUTF-8 JSONとして送りますが、マイクとスピーカーのPCMは既存のバイナリフレームを維持します。
+`stackchan.event.v1`の`conversation.start`は自動会話を開始し、`conversation.stop`は現在の会話を停止します。
+同じ`requestId`の再送には直近64件から同一の`conversation.result`を返し、操作を重複実行しません。
 
 `type: function`はｽﾀｯｸﾁｬﾝ側で実行します。
 `type: mcp`はAndroidが公式Kotlin SDKを使ってStreamable HTTPサーバーへ接続し、必要なら画面上で実行承認を求めます。

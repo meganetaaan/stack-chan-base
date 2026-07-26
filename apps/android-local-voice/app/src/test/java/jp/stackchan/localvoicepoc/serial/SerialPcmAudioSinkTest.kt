@@ -230,7 +230,10 @@ class SerialPcmAudioSinkTest {
                 true
             } ?: false
             transport.emitError(errorCode = 7, streamId = activeStream)
-            runCatching { withTimeout(500) { finish.await() } }
+            val failure = withTimeout(500) {
+                runCatching { finish.await() }.exceptionOrNull()
+            }
+            assertTrue(failure is StackChanRemoteException)
             ended
         }
 

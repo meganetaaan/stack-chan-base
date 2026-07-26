@@ -1116,6 +1116,7 @@ private fun usbStatusLabel(state: MainUiState): String = when (state.usbStatus) 
 
 private fun phaseLabel(phase: ConversationPhase, automaticMode: Boolean): String = when (phase) {
     ConversationPhase.IDLE -> "話しかけられます"
+    ConversationPhase.CONNECTING -> "マイクを準備しています"
     ConversationPhase.LISTENING -> "声を待っています"
     ConversationPhase.RECORDING -> if (automaticMode) "聞いています" else "録音しています"
     ConversationPhase.TRANSCRIBING -> "声を認識しています"

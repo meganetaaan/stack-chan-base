@@ -14,13 +14,18 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import org.junit.Assert.assertFalse
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -29,6 +34,85 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
 class ConversationEngineTest {
+    @Test
+    fun automaticConversationReportsListeningOnlyAfterTheFirstPcmFrame() = runBlocking {
+        val source = PushAudioSource()
+        val engine = ConversationEngine(
+            audioSource = source,
+            audioSink = RecordingSink(),
+            synthesizer = OneChunkSynthesizer,
+            speechRecognizer = FixedRecognizer,
+            languageModel = FakeLanguageModel(flow { emit("応答です。") }),
+            endpointDetectorFactory = { NeverSpeechDetector },
+        )
+        val phases = Channel<ConversationPhase>(Channel.UNLIMITED)
+        val collector = launch {
+            engine.events.collect { event ->
+                if (event is ConversationEvent.PhaseChanged) phases.send(event.phase)
+            }
+        }
+        yield()
+
+        engine.startAutomatic()
+        assertEquals(ConversationPhase.CONNECTING, withTimeout(TEST_TIMEOUT_MS) { phases.receive() })
+        assertNull(withTimeoutOrNull(50) { phases.receive() })
+        source.frames.send(ByteArray(640))
+        assertEquals(ConversationPhase.LISTENING, withTimeout(TEST_TIMEOUT_MS) { phases.receive() })
+
+        engine.stop()
+        collector.cancel()
+        engine.close()
+    }
+
+    @Test
+    fun reportsConnectingUntilTheFirstAcknowledgedPcmFrameArrives() = runBlocking {
+        val source = PushAudioSource()
+        val engine = ConversationEngine(
+            audioSource = source,
+            audioSink = RecordingSink(),
+            synthesizer = OneChunkSynthesizer,
+            speechRecognizer = FixedRecognizer,
+            languageModel = FakeLanguageModel(flow { emit("応答です。") }),
+        )
+        val phases = Channel<ConversationPhase>(Channel.UNLIMITED)
+        val collector = launch {
+            engine.events.collect { event ->
+                if (event is ConversationEvent.PhaseChanged) phases.send(event.phase)
+            }
+        }
+        yield()
+
+        engine.startPushToTalk()
+        assertEquals(ConversationPhase.CONNECTING, withTimeout(TEST_TIMEOUT_MS) { phases.receive() })
+        source.frames.send(ByteArray(640))
+        assertEquals(ConversationPhase.RECORDING, withTimeout(TEST_TIMEOUT_MS) { phases.receive() })
+
+        engine.stop()
+        collector.cancel()
+        engine.close()
+    }
+
+    @Test
+    fun automaticConversationCannotOverlapPushToTalkStartup() = runBlocking {
+        val source = PushAudioSource()
+        val engine = ConversationEngine(
+            audioSource = source,
+            audioSink = RecordingSink(),
+            synthesizer = OneChunkSynthesizer,
+            speechRecognizer = FixedRecognizer,
+            languageModel = FakeLanguageModel(flow { emit("応答です。") }),
+        )
+
+        engine.startPushToTalk()
+        val error = assertThrows(IllegalStateException::class.java) {
+            engine.startAutomatic()
+        }
+
+        assertTrue(error.message.orEmpty().contains("Push-to-talk"))
+        engine.stop()
+        engine.close()
+    }
+
     @Test
     fun languageModelFailureAfterAPartialSentenceAbortsPlayback() = runBlocking {
         val sink = RecordingSink()
@@ -48,7 +132,7 @@ class ConversationEngineTest {
         )
 
         val failure = runCatching {
-            withTimeout(1_000) { engine.generateAndSpeak("test") }
+            withTimeout(TEST_TIMEOUT_MS) { engine.generateAndSpeak("test") }
         }.exceptionOrNull()
 
         assertTrue(failure is IOException)
@@ -73,16 +157,16 @@ class ConversationEngineTest {
         engine.startPushToTalk()
         source.frames.send(ByteArray(9_000))
         engine.stopPushToTalkAndProcess()
-        withTimeout(1_000) { sink.pcmWritten.await() }
+        withTimeout(TEST_TIMEOUT_MS) { sink.pcmWritten.await() }
         val stopping = async { engine.stop() }
-        withTimeout(1_000) { sink.abortEntered.await() }
+        withTimeout(TEST_TIMEOUT_MS) { sink.abortEntered.await() }
         synthesizer.allowFirstSentenceToComplete.complete(Unit)
         val secondSynthesisStarted = withTimeoutOrNull(300) {
             while (synthesizer.calls.get() < 2) delay(1)
             true
         } ?: false
         sink.releaseAbort.complete(Unit)
-        withTimeout(1_000) { stopping.await() }
+        withTimeout(TEST_TIMEOUT_MS) { stopping.await() }
 
         assertFalse("no new Piper sentence may start after stop begins", secondSynthesisStarted)
         assertEquals(1, synthesizer.calls.get())
@@ -223,5 +307,15 @@ class ConversationEngineTest {
         override suspend fun load(modelDirectory: File) = Unit
         override suspend fun transcribe(pcm16Le: ByteArray, sampleRate: Int): String = "test"
         override fun close() = Unit
+    }
+
+    private object NeverSpeechDetector : SpeechEndpointDetector {
+        override fun reset() = Unit
+        override fun isSpeech(chunk: ByteArray): Boolean = false
+        override fun close() = Unit
+    }
+
+    private companion object {
+        const val TEST_TIMEOUT_MS = 5_000L
     }
 }

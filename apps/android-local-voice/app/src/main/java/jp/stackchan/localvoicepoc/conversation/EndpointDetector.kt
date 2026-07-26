@@ -6,11 +6,16 @@ import com.konovalov.vad.webrtc.config.Mode
 import com.konovalov.vad.webrtc.config.SampleRate
 import jp.stackchan.localvoicepoc.util.Pcm
 
+interface SpeechEndpointDetector : AutoCloseable {
+    fun reset()
+    fun isSpeech(chunk: ByteArray): Boolean
+}
+
 /** Detects speech from 16 kHz, mono, little-endian PCM16 audio. */
 class EndpointDetector(
     private val minimumRmsThreshold: Float = 0.0035f,
     private val noiseMultiplier: Float = 2.2f,
-) : AutoCloseable {
+) : SpeechEndpointDetector {
     private val vad = VadWebRTC(
         SampleRate.SAMPLE_RATE_16K,
         FrameSize.FRAME_SIZE_320,
@@ -21,11 +26,11 @@ class EndpointDetector(
     private val frame = ShortArray(FRAME_SAMPLES)
     private val noiseGate = AdaptiveNoiseGate(minimumRmsThreshold, noiseMultiplier)
 
-    fun reset() {
+    override fun reset() {
         noiseGate.reset()
     }
 
-    fun isSpeech(chunk: ByteArray): Boolean {
+    override fun isSpeech(chunk: ByteArray): Boolean {
         val webRtcSpeech = detectWithWebRtc(chunk)
         val rms = Pcm.rms16Le(chunk)
 

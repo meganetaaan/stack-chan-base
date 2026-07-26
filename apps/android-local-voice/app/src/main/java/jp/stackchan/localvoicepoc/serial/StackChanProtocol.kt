@@ -50,9 +50,18 @@ object StackChanCapabilities {
     const val SPEAKER_TEXT = 1 shl 6
     const val STATUS_ICON = 1 shl 8
     const val STREAM_ID = 1 shl 9
+    const val EVENT = 1 shl 10
+    const val STATUS_EXTENDED = 1 shl 11
     const val REQUIRED = MICROPHONE_PCM or SPEAKER_PCM or SPEAKER_CREDIT or SPEAKER_RATE_24000 or STREAM_ID
-    const val ALL = REQUIRED or SPEAKER_RATE_8000 or SPEAKER_RATE_16000 or SPEAKER_TEXT or STATUS_ICON or STREAM_ID
+    const val ALL = REQUIRED or SPEAKER_RATE_8000 or SPEAKER_RATE_16000 or SPEAKER_TEXT or STATUS_ICON or
+        STREAM_ID or EVENT or STATUS_EXTENDED
 }
+
+fun Int.hasStackChanCapability(capability: Int): Boolean = this and capability != 0
+
+fun canUseBidirectionalStackChanEvents(localCapabilities: Int, peerCapabilities: Int): Boolean =
+    localCapabilities.hasStackChanCapability(StackChanCapabilities.EVENT) &&
+        peerCapabilities.hasStackChanCapability(StackChanCapabilities.EVENT)
 
 internal object StackChanStreamIdAllocator {
     private val lastId = AtomicInteger(0)
@@ -64,12 +73,18 @@ enum class StackChanStatus(val wireValue: Int) {
     IDLE(0),
     RECOGNIZING(1),
     SPEAKING(2),
+    LISTENING(3),
+    CONNECTING(4),
+    ERROR(5),
 }
 
-fun helloPayload(maxPayload: Int = StackChanFrameCodec.MAX_PAYLOAD_BYTES): ByteArray =
+fun helloPayload(
+    maxPayload: Int = StackChanFrameCodec.MAX_PAYLOAD_BYTES,
+    capabilities: Int = StackChanCapabilities.ALL,
+): ByteArray =
     ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
         .putInt(maxPayload)
-        .putInt(StackChanCapabilities.ALL)
+        .putInt(capabilities)
         .array()
 
 fun parseHelloPayload(payload: ByteArray): Pair<Int, Int> {

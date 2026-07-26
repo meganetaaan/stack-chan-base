@@ -23,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AgentsA1LanguageModel(
     context: Context,
@@ -30,10 +31,11 @@ class AgentsA1LanguageModel(
 ) : LocalLanguageModel {
     private val operationMutex = Mutex()
     private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val closed = AtomicBoolean(false)
     @Volatile
     private var loadedModel: ModelInfo? = null
 
-    override val isLoaded: Boolean get() = loadedModel != null
+    override val isLoaded: Boolean get() = !closed.get() && loadedModel != null
     override val backend: LanguageModelBackend? get() =
         if (isLoaded) LanguageModelBackend.LLAMA_CPP else null
 
@@ -42,6 +44,7 @@ class AgentsA1LanguageModel(
         modelFile: File,
         preference: LanguageModelBackendPreference,
     ): LanguageModelBackend = operationMutex.withLock {
+        check(!closed.get()) { "Agents A1は終了済みです" }
         require(modelSpec.runtime == LanguageModelRuntime.LLAMA_CPP)
         check(modelFile.isFile) { "LLMモデルが見つかりません: ${modelFile.absolutePath}" }
         loadedModel?.let { unload(it) }
@@ -69,6 +72,7 @@ class AgentsA1LanguageModel(
 
     override fun generate(request: GenerationRequest): Flow<String> = flow {
         operationMutex.withLock {
+            check(!closed.get()) { "Agents A1は終了済みです" }
             check(isLoaded) { "Agents A1がロードされていません" }
             val warmUp = isWarmUp(request)
             var prompt = conversationPrompt(request, includeTools = !warmUp)
@@ -186,6 +190,7 @@ class AgentsA1LanguageModel(
     }
 
     override fun close() {
+        if (!closed.compareAndSet(false, true)) return
         cleanupScope.launch {
             operationMutex.withLock {
                 val model = loadedModel ?: return@withLock

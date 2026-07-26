@@ -11,17 +11,29 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+interface RemoteToolRegistry {
+    val definitions: List<ToolDefinition>
+
+    fun installRemoteTools(
+        tools: List<ToolDefinition>,
+        functionExecutor: ToolExecutor,
+        mcpToolExecutor: ToolExecutor,
+    )
+
+    fun clearRemoteTools()
+}
+
 class DeviceToolRegistry(
     context: Context,
     private val onExecute: (DeviceToolCall) -> Unit = {},
-) {
+) : RemoteToolRegistry {
     private val appContext = context.applicationContext
 
     @Volatile private var remoteTools: Map<String, ToolDefinition> = emptyMap()
     @Volatile private var remoteExecutor: ToolExecutor? = null
     @Volatile private var mcpExecutor: ToolExecutor? = null
 
-    val definitions: List<ToolDefinition>
+    override val definitions: List<ToolDefinition>
         get() = BUILT_INS + remoteTools.values
 
     val supportedNames: Set<String>
@@ -44,7 +56,7 @@ class DeviceToolRegistry(
             append("引数がない場合はparameterを省略してください。ツール結果後はタグを含めず日本語で回答してください。")
         }
 
-    fun installRemoteTools(
+    override fun installRemoteTools(
         tools: List<ToolDefinition>,
         functionExecutor: ToolExecutor,
         mcpToolExecutor: ToolExecutor,
@@ -56,7 +68,7 @@ class DeviceToolRegistry(
         mcpExecutor = mcpToolExecutor
     }
 
-    fun clearRemoteTools() {
+    override fun clearRemoteTools() {
         remoteTools = emptyMap()
         remoteExecutor = null
         mcpExecutor = null

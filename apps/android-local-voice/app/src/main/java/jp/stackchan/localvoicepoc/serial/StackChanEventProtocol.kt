@@ -47,23 +47,28 @@ class StackChanEventDecoder {
     fun push(frame: StackChanFrame): String? {
         require(frame.type == StackChanFrame.Type.EVENT)
         require(frame.streamId != 0) { "Event stream ID must not be zero" }
-        val starts = frame.flags and StackChanEventFlags.START != 0
-        val ends = frame.flags and StackChanEventFlags.END != 0
-        val state = if (starts) {
-            require(frame.sequence == 0) { "First event chunk must have sequence zero" }
-            Pending(0, ByteArrayOutputStream()).also { pending[frame.streamId] = it }
-        } else {
-            pending[frame.streamId] ?: error("Event continuation has no start chunk")
+        try {
+            val starts = frame.flags and StackChanEventFlags.START != 0
+            val ends = frame.flags and StackChanEventFlags.END != 0
+            val state = if (starts) {
+                require(frame.sequence == 0) { "First event chunk must have sequence zero" }
+                Pending(0, ByteArrayOutputStream()).also { pending[frame.streamId] = it }
+            } else {
+                pending[frame.streamId] ?: error("Event continuation has no start chunk")
+            }
+            require(frame.sequence == state.nextSequence) { "Event chunk sequence mismatch" }
+            require(state.bytes.size() + frame.payload.size <= StackChanEventEncoder.MAX_EVENT_BYTES) {
+                "Event is too large"
+            }
+            state.bytes.write(frame.payload)
+            pending[frame.streamId] = state.copy(nextSequence = state.nextSequence + 1)
+            if (!ends) return null
+            pending.remove(frame.streamId)
+            return state.bytes.toByteArray().decodeToString(throwOnInvalidSequence = true)
+        } catch (error: Throwable) {
+            pending.remove(frame.streamId)
+            throw error
         }
-        require(frame.sequence == state.nextSequence) { "Event chunk sequence mismatch" }
-        require(state.bytes.size() + frame.payload.size <= StackChanEventEncoder.MAX_EVENT_BYTES) {
-            "Event is too large"
-        }
-        state.bytes.write(frame.payload)
-        pending[frame.streamId] = state.copy(nextSequence = state.nextSequence + 1)
-        if (!ends) return null
-        pending.remove(frame.streamId)
-        return state.bytes.toByteArray().decodeToString(throwOnInvalidSequence = true)
     }
 
     fun reset() = pending.clear()

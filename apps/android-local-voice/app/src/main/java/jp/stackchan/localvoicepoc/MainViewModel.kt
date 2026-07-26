@@ -18,7 +18,13 @@ import jp.stackchan.localvoicepoc.mcp.AndroidMcpToolProvider
 import jp.stackchan.localvoicepoc.mcp.McpApprovalRequest
 import jp.stackchan.localvoicepoc.mcp.McpProfile
 import jp.stackchan.localvoicepoc.mcp.McpProfileStore
+import jp.stackchan.localvoicepoc.realtime.ConversationCommandHandler
+import jp.stackchan.localvoicepoc.realtime.ConversationCommandResult
 import jp.stackchan.localvoicepoc.realtime.RealtimeSessionController
+import jp.stackchan.localvoicepoc.realtime.RemoteConversationStartDecision
+import jp.stackchan.localvoicepoc.realtime.RemoteConversationState
+import jp.stackchan.localvoicepoc.realtime.decideRemoteConversationStart
+import jp.stackchan.localvoicepoc.realtime.stackChanStatusFor
 import jp.stackchan.localvoicepoc.model.ModelComponent
 import jp.stackchan.localvoicepoc.model.ModelSetupManager
 import jp.stackchan.localvoicepoc.piper.PiperAssetStore
@@ -109,6 +115,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             transport = usbConnection,
             registry = toolRegistry,
             mcp = mcpTools,
+            conversationCommands = object : ConversationCommandHandler {
+                override suspend fun start(): ConversationCommandResult = handleRemoteConversationStart()
+                override suspend fun stop(): ConversationCommandResult = handleRemoteConversationStop()
+            },
             scope = viewModelScope,
         ).also { it.start() }
         Log.i(TAG, "Voice diagnostics directory: ${voiceDiagnosticsDirectory.absolutePath}")
@@ -309,8 +319,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startAutomatic() {
-        runCatching { engine.startAutomatic() }
-            .onFailure(::showError)
+        runCatching {
+            mutableState.update { it.copy(error = null) }
+            engine.startAutomatic()
+        }
+            .onFailure { error ->
+                showError(error)
+                viewModelScope.launch { syncStackChanStatus(mutableState.value.phase) }
+            }
     }
 
     fun stopConversation() {
@@ -318,8 +334,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startPushToTalk() {
-        runCatching { engine.startPushToTalk() }
-            .onFailure(::showError)
+        runCatching {
+            mutableState.update { it.copy(error = null) }
+            engine.startPushToTalk()
+        }
+            .onFailure { error ->
+                showError(error)
+                viewModelScope.launch { syncStackChanStatus(mutableState.value.phase) }
+            }
     }
 
     fun stopPushToTalkAndProcess() {
@@ -328,6 +350,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearError() {
         mutableState.update { it.copy(error = null) }
+        viewModelScope.launch { syncStackChanStatus(mutableState.value.phase) }
     }
 
     fun retryUsbConnection() {
@@ -621,8 +644,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     assistantDraft = "",
                 )
             }
-            is ConversationEvent.Failure -> showError(event.cause ?: IllegalStateException(event.message))
+            is ConversationEvent.Failure -> {
+                showError(event.cause ?: IllegalStateException(event.message))
+                syncStackChanStatus(mutableState.value.phase)
+            }
         }
+    }
+
+    private suspend fun handleRemoteConversationStart(): ConversationCommandResult {
+        val current = mutableState.value
+        when (
+            val decision = decideRemoteConversationStart(
+                pipelineReady = current.pipelineReady,
+                automaticMode = current.automaticMode,
+                phase = current.phase,
+            )
+        ) {
+            is RemoteConversationStartDecision.AlreadyActive -> {
+                return ConversationCommandResult(true, decision.state)
+            }
+            is RemoteConversationStartDecision.Reject -> {
+                return ConversationCommandResult(
+                    success = false,
+                    state = RemoteConversationState.BLOCKED,
+                    error = decision.error,
+                )
+            }
+            RemoteConversationStartDecision.StartAutomatic -> Unit
+        }
+        return try {
+            engine.startAutomatic()
+            mutableState.update { it.copy(automaticMode = true, error = null) }
+            ConversationCommandResult(true, RemoteConversationState.CONNECTING)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            showError(error)
+            syncStackChanStatus(mutableState.value.phase)
+            ConversationCommandResult(
+                success = false,
+                state = RemoteConversationState.BLOCKED,
+                error = error.message ?: error::class.java.simpleName,
+            )
+        }
+    }
+
+    private suspend fun handleRemoteConversationStop(): ConversationCommandResult = try {
+        engine.stop()
+        ConversationCommandResult(true, RemoteConversationState.STANDBY)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        showError(error)
+        syncStackChanStatus(mutableState.value.phase)
+        ConversationCommandResult(
+            success = false,
+            state = RemoteConversationState.BLOCKED,
+            error = error.message ?: error::class.java.simpleName,
+        )
     }
 
     private fun showError(error: Throwable) {
@@ -635,11 +714,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stackChanStatusMutex.withLock {
             val ready = usbConnection.state.value as? StackChanUsbState.Ready ?: return
             if (ready.capabilities and StackChanCapabilities.STATUS_ICON == 0) return
-            val status = when (phase) {
-                ConversationPhase.TRANSCRIBING -> StackChanStatus.RECOGNIZING
-                ConversationPhase.SPEAKING -> StackChanStatus.SPEAKING
-                else -> StackChanStatus.IDLE
-            }
+            val extended = ready.capabilities and StackChanCapabilities.STATUS_EXTENDED != 0
+            val status = stackChanStatusFor(
+                phase = phase,
+                extended = extended,
+                hasError = mutableState.value.error != null,
+            )
             if (status == lastStackChanStatus) return
             val sent = withContext(Dispatchers.IO) {
                 runCatching {

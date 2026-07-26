@@ -88,6 +88,21 @@ class StackChanFrameCodecTest {
     }
 
     @Test
+    fun advertisesNegotiatedEventsAndExtendedStatusWithoutRequiringThem() {
+        assertEquals(1 shl 10, StackChanCapabilities.EVENT)
+        assertEquals(1 shl 11, StackChanCapabilities.STATUS_EXTENDED)
+        assertTrue(StackChanCapabilities.ALL and StackChanCapabilities.EVENT != 0)
+        assertTrue(StackChanCapabilities.ALL and StackChanCapabilities.STATUS_EXTENDED != 0)
+        assertEquals(0, StackChanCapabilities.REQUIRED and StackChanCapabilities.EVENT)
+        assertEquals(0, StackChanCapabilities.REQUIRED and StackChanCapabilities.STATUS_EXTENDED)
+        val (_, capabilities) = parseHelloPayload(helloPayload())
+        assertEquals(StackChanCapabilities.ALL, capabilities)
+        assertEquals(3, StackChanStatus.LISTENING.wireValue)
+        assertEquals(4, StackChanStatus.CONNECTING.wireValue)
+        assertEquals(5, StackChanStatus.ERROR.wireValue)
+    }
+
+    @Test
     fun explainsDistinctFirmwareSpeakerReceiveErrors() {
         assertEquals(6, StackChanErrorCode.SPEAKER_SEQUENCE_MISMATCH.wireValue)
         assertEquals(7, StackChanErrorCode.SPEAKER_BUFFER_OVERFLOW.wireValue)

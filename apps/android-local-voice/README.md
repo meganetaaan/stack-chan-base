@@ -52,6 +52,7 @@ USB切断時は会話を停止し、再接続後に画面から通信を再試�
 - Piper出力を24 kHzへ逐次変換し、5秒のproducer queueとcredit制御でCoreS3へ送る処理
 - 発話中の口パク、自律表情の一時停止、文単位の吹き出し表示
 - CoreS3側の認識中・発話中アイコン表示
+- EVENT capability交渉、頭上スワイプによる自動会話の開始・停止、拡張会話状態表示
 - Piper PCM長とUSB再生終了理由を記録するJSON Lines trace
 - USBシリアル向けバイナリフレームcodec、破損復帰parser、単体テスト
 
@@ -97,11 +98,16 @@ app/libs/piper-plus-release.aar
 SHA-256: b43d4aeb46af952db7205106dfed68a51bab19fc8343370479a467caf9e3b688
 ```
 
-記録済みの版を用意した場合は、次のコマンドで検証できます。
+上記の記録済みビルドと一致することは、固定したdigestを直接指定して検証します。
 
 ```bash
-sha256sum -c app/libs/piper-plus-release.aar.sha256
+printf '%s  %s\n' \
+  b43d4aeb46af952db7205106dfed68a51bab19fc8343370479a467caf9e3b688 \
+  app/libs/piper-plus-release.aar | sha256sum -c -
 ```
+
+`install_piper_aar.sh`が生成する`.sha256`は、導入後のローカルファイルが変化していないことを確認するための記録です。
+入手元やrelease artifactの真正性を証明するものではありません。
 
 AARを別の場所から導入または差し替える場合も、インストールスクリプトを使います。
 

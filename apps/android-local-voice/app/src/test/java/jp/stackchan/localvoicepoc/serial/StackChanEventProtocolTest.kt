@@ -26,6 +26,7 @@ class StackChanEventProtocolTest {
         decoder.push(frames[0])
 
         assertThrows(IllegalArgumentException::class.java) { decoder.push(frames[2]) }
+        assertThrows(IllegalStateException::class.java) { decoder.push(frames[2]) }
     }
 
     @Test

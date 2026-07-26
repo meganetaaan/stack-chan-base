@@ -42,9 +42,10 @@ class ConversationEngine(
     private val speechRecognizer: LocalSpeechRecognizer,
     private val languageModel: LocalLanguageModel,
     private val recognitionCaptureStore: RecognitionCaptureStore? = null,
+    private val endpointDetectorFactory: () -> SpeechEndpointDetector = { EndpointDetector() },
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val detector = lazy { EndpointDetector() }
+    private val detector = lazy(endpointDetectorFactory)
     private val mutableEvents = MutableSharedFlow<ConversationEvent>(extraBufferCapacity = 64)
     private val history = ArrayDeque<Pair<String, String>>()
 
@@ -56,13 +57,14 @@ class ConversationEngine(
 
     fun startAutomatic() {
         check(sessionJob?.isActive != true) { "A conversation session is already running" }
+        check(pushToTalkJob?.isActive != true) { "Push-to-talk recording is already running" }
         check(synthesizer.isLoaded) { "Piper Plus is not loaded" }
         check(languageModel.isLoaded) { "LLM is not loaded" }
 
         sessionJob = scope.launch {
             try {
                 while (isActive) {
-                    emitPhase(ConversationPhase.LISTENING)
+                    emitPhase(ConversationPhase.CONNECTING)
                     val audio = captureAutomaticUtterance()
                     processUtterance(audio, RecognitionCaptureTrigger.AUTOMATIC)
                 }
@@ -76,6 +78,7 @@ class ConversationEngine(
                 audioSource.stop()
                 withContext(NonCancellable) {
                     audioSink.abort()
+                    sessionJob = null
                     emitPhase(ConversationPhase.IDLE)
                 }
             }
@@ -92,8 +95,13 @@ class ConversationEngine(
         pushToTalkBuffer = buffer
         pushToTalkJob = scope.launch {
             try {
-                emitPhase(ConversationPhase.RECORDING)
+                emitPhase(ConversationPhase.CONNECTING)
+                var started = false
                 audioSource.chunks().collect { chunk ->
+                    if (!started) {
+                        started = true
+                        emitPhase(ConversationPhase.RECORDING)
+                    }
                     buffer.write(chunk)
                     mutableEvents.tryEmit(ConversationEvent.AudioLevel(Pcm.rms16Le(chunk)))
                 }
@@ -160,8 +168,13 @@ class ConversationEngine(
     private suspend fun captureAutomaticUtterance(): ByteArray {
         detector.value.reset()
         val accumulator = UtteranceAccumulator()
+        var started = false
         return audioSource.chunks()
             .mapNotNull { chunk ->
+                if (!started) {
+                    started = true
+                    emitPhase(ConversationPhase.LISTENING)
+                }
                 mutableEvents.tryEmit(ConversationEvent.AudioLevel(Pcm.rms16Le(chunk)))
                 val speech = detector.value.isSpeech(chunk)
                 val wasCapturing = accumulator.isCapturing

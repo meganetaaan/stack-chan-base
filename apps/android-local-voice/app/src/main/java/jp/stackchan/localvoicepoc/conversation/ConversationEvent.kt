@@ -11,6 +11,7 @@ sealed interface ConversationEvent {
 
 enum class ConversationPhase {
     IDLE,
+    CONNECTING,
     LISTENING,
     RECORDING,
     TRANSCRIBING,
