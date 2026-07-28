@@ -9,13 +9,36 @@ const REALTIME_SDP_TIMEOUT_MS = 30_000
 export type AppServerThreadOptions = {
   threadId?: string
   cwd: string
+  dynamicTools?: DynamicToolSpec[]
 }
 
 export type RealtimeStartOptions = {
   sdp: string
   voice?: string
+  prompt?: string
   sdpTimeoutMilliseconds?: number
 }
+
+export type DynamicToolSpec =
+  | {
+      type: 'function'
+      name: string
+      description: string
+      inputSchema: unknown
+      deferLoading?: boolean
+    }
+  | {
+      type: 'namespace'
+      name: string
+      description: string
+      tools: Array<{
+        type: 'function'
+        name: string
+        description: string
+        inputSchema: unknown
+        deferLoading?: boolean
+      }>
+    }
 
 type ThreadResponse = {
   thread: {
@@ -94,7 +117,10 @@ export class CodexAppServer extends EventEmitter {
           ...common,
           excludeTurns: true,
         })
-      : await this.rpc.request<ThreadResponse>('thread/start', common)
+      : await this.rpc.request<ThreadResponse>('thread/start', {
+          ...common,
+          ...(options.dynamicTools ? { dynamicTools: options.dynamicTools } : {}),
+        })
     if (!isRecord(response) || !isRecord(response.thread) || typeof response.thread.id !== 'string') {
       throw new NonRetryableError('protocol', 'app-server returned an invalid thread response')
     }
@@ -191,6 +217,7 @@ export class CodexAppServer extends EventEmitter {
       },
     }
     if (options.voice) params.voice = options.voice
+    if (options.prompt) params.prompt = options.prompt
     try {
       const negotiation = Promise.all([
         this.rpc.request('thread/realtime/start', params),

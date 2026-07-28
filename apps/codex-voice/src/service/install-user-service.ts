@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { discoverStackChanDeviceId } from '../usb/device.js'
@@ -14,6 +14,7 @@ import {
   GENERATED_UNIT_MARKER,
   validateSystemdUnitName,
 } from './user-service.js'
+import { loadActiveWorkspace } from '../workspace.js'
 
 const DEFAULT_UNIT_NAME = 'stackchan-codex-voice.service'
 
@@ -22,10 +23,8 @@ async function main(): Promise<void> {
     allowPositionals: false,
     strict: true,
     options: {
-      cwd: { type: 'string' },
       port: { type: 'string' },
       socket: { type: 'string' },
-      voice: { type: 'string' },
       'unit-name': { type: 'string' },
       'dry-run': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -36,7 +35,7 @@ async function main(): Promise<void> {
     return
   }
 
-  const cwd = resolve(parsed.values.cwd ?? process.cwd())
+  const workspace = await loadActiveWorkspace()
   const portPath = parsed.values.port ?? '/dev/ttyACM0'
   const unitName = validateSystemdUnitName(
     parsed.values['unit-name'] ?? DEFAULT_UNIT_NAME,
@@ -47,12 +46,10 @@ async function main(): Promise<void> {
   const unit = buildStackChanUserServiceUnit({
     nodePath: process.execPath,
     cliPath,
-    cwd,
     deviceId,
     ...(parsed.values.socket
       ? { socketPath: parsed.values.socket }
       : {}),
-    ...(parsed.values.voice ? { voice: parsed.values.voice } : {}),
   })
 
   if (parsed.values['dry-run']) {
@@ -72,7 +69,7 @@ async function main(): Promise<void> {
   await rename(temporaryPath, unitPath)
   await enableAndStartUserService(unitName, runSystemctl)
   console.log(
-    `systemd user serviceを導入しました: ${unitName} deviceId=${deviceId}`,
+    `systemd user serviceを導入しました: ${unitName} deviceId=${deviceId} workspace=${workspace.root}`,
   )
 }
 
@@ -124,10 +121,8 @@ systemd --userサービスとして導入します。unitは--device-idを使う
 別のCoreS3へ自動接続しません。
 
 Options:
-  --cwd <path>       Codex threadの作業ディレクトリ
   --port <path>      ID取得元（既定: /dev/ttyACM0）
   --socket <path>    app-server daemonのUnix socket
-  --voice <name>     Realtime voice
   --unit-name <name> systemd unit名
   --dry-run          unitを表示するだけで書き込まない
   -h, --help         このヘルプを表示

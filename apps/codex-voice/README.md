@@ -48,12 +48,54 @@ npm run generate:codex-types
 
 ## 実行
 
-新しいthreadを開始します。
+会話用workspaceを初期化します。
 
 ```bash
 node dist/src/cli.js \
-  --cwd /absolute/path/to/project \
-  --port /dev/ttyACM0
+  config init /absolute/path/to/conversation-workspace
+
+node dist/src/cli.js \
+  config set voice spruce \
+  --workspace /absolute/path/to/conversation-workspace
+
+node dist/src/cli.js \
+  workspace use /absolute/path/to/conversation-workspace
+```
+
+workspaceには`.stackchan/session.toml`、`.stackchan/realtime-prompt.md`、
+`AGENTS.md`、`.agents/skills/stackchan/SKILL.md`を作成します。
+workspaceルートをCodex threadの作業ディレクトリとし、プロセス起動時は常に新しいthreadを開始します。
+voiceを省略するとapp-serverの既定値を使用します。
+
+利用可能なvoiceはUSB接続なしで確認できます。
+
+```bash
+node dist/src/cli.js voice list
+```
+
+Codex app-serverのRealtime v3が現在返すvoiceは次の9種類です。
+
+| 設定値 |
+| --- |
+| `juniper` |
+| `maple` |
+| `spruce` |
+| `ember` |
+| `vale` |
+| `breeze` |
+| `arbor` |
+| `sol` |
+| `cove` |
+
+app-serverの既定値は`cove`です。
+この一覧はGPT-Liveを使う[ChatGPT Voice](https://learn.chatgpt.com/docs/features/voice)の選択肢と同じ系列です。
+公開Realtime APIを直接利用する場合の[voice options](https://developers.openai.com/api/docs/guides/realtime-conversations#voice-options)とは別系列なので、設定可能な値を混同しないでください。
+提供側の変更に追従する必要があるため、実行環境での正本は常に`voice list`の出力です。
+
+音声ブリッジを起動します。
+
+```bash
+node dist/src/cli.js run --port /dev/ttyACM0
 ```
 
 起動後はstandbyで待機します。
@@ -68,19 +110,11 @@ MOD側で別のAudioOutを開かないため、応答再生中の後方スワイ
 
 従来どおり起動直後にRealtimeを開始する診断では、`--start-immediately`を追加します。
 
-既存threadを再開します。
-
-```bash
-node dist/src/cli.js \
-  --cwd /absolute/path/to/project \
-  --thread THREAD_ID \
-  --port /dev/ttyACM0
-```
-
 daemon socketも明示する場合:
 
 ```bash
 node dist/src/cli.js \
+  run \
   --port /dev/ttyACM0 \
   --socket /tmp/stackchan-codex.sock
 ```
@@ -89,12 +123,14 @@ node dist/src/cli.js \
 
 ```bash
 node dist/src/cli.js \
-  --cwd /absolute/path/to/project \
+  run \
   --device-id USB_SERIAL_NUMBER
 ```
 
 `--device-id`と`--port`は同時に指定できません。
 指定したIDが見つからなくても、別のCoreS3へ自動接続しません。
+`--cwd`、`--voice`、`--thread`は受け付けません。
+会話設定を変更した場合は`workspace apply`で常駐serviceへ反映します。
 
 `You have reached your usage limit.`が表示された場合、WebRTC接続自体ではなくChatGPT側のVoice利用枠に達しています。
 このエラーにはapp-serverからリセット時刻が付かないため、ブリッジはRealtimeの自動再接続を停止してエラー表示を出します。
@@ -113,9 +149,8 @@ daemon側の記録は通常`~/.codex/app-server-daemon/app-server.stderr.log`で
 
 ```bash
 npm run build
-npm run install:user-service -- \
-  --cwd /absolute/path/to/project \
-  --port /dev/ttyACM0
+node dist/src/cli.js workspace use /absolute/path/to/conversation-workspace
+npm run install:user-service -- --port /dev/ttyACM0
 ```
 
 生成内容だけを確認する場合は`--dry-run`を追加します。
@@ -129,8 +164,9 @@ journalctl --user -u stackchan-codex-voice.service -f
 同名unitがこのインストーラの生成物でない場合は上書きしません。
 インストーラはunitを有効化した後に`is-active`を検査し、起動できないunitを成功として報告しません。
 
-旧`bridge/codex-stackchan-voice`または`hosts/codex-voice`から移行する場合、既存unitには移動前のCLI絶対パスが残っています。
-新しいディレクトリで同じオプションを指定してインストーラを再実行した後、unitを明示的に再起動してください。
+旧`bridge/codex-stackchan-voice`、`hosts/codex-voice`、または旧CLIから移行する場合、
+既存unitには移動前のCLI絶対パスや`--cwd`、`--voice`が残っています。
+先に`workspace use`を実行し、新しいディレクトリでインストーラを再実行してください。
 
 ```bash
 systemctl --user restart stackchan-codex-voice.service
@@ -178,6 +214,8 @@ ICEテストは、単発のSTUN応答欠落後も監視を続けること、4秒
 - CoreS3のOKは一回限りの`accept`、NGは`decline`として返します。
 - `acceptForSession`やpolicy amendmentへ自動変換しません。
 - コマンド実行とファイル変更以外のserver requestは明示的なunsupported errorで拒否します。
+- `stackchan.get_status`だけを固定dynamic toolとして公開し、USB接続と会話状態を読み取り専用で返します。
+- workspace skillはツールの利用方針だけを定義し、任意コードをdynamic toolとして登録しません。
 - 承認中にUSBが切断されても要求を解決せず、再接続または別CLIからの解決を待ちます。
 - シグナル終了時と再試行不能エラー時は、未解決の承認を拒否してからdaemonとのWebSocket接続を閉じます。
 - PCM、コマンド全文、ファイル差分本文をログへ保存しません。

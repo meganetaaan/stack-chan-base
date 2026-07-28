@@ -42,14 +42,8 @@ export type ConversationAudioFactory = (
 export type ConversationSessionControllerOptions = {
   audioFactory?: ConversationAudioFactory
   feedback?: ConversationChimePlayer
+  realtimePrompt?: string
 }
-
-const defaultAudioFactory: ConversationAudioFactory = (
-  appServer,
-  device,
-  voice,
-  onStateChanged,
-) => new RealtimeAudioBridge(appServer, device, voice, undefined, undefined, onStateChanged)
 
 type Attachment = {
   active: boolean
@@ -85,7 +79,18 @@ export class ConversationSessionController {
   ) {
     this.#device = device
     this.#voice = voice
-    this.#audioFactory = options.audioFactory ?? defaultAudioFactory
+    this.#audioFactory =
+      options.audioFactory ??
+      ((appServer, stackChanDevice, realtimeVoice, onStateChanged) =>
+        new RealtimeAudioBridge(
+          appServer,
+          stackChanDevice,
+          realtimeVoice,
+          undefined,
+          undefined,
+          onStateChanged,
+          options.realtimePrompt,
+        ))
     this.#feedback = options.feedback ?? new UsbConversationChimePlayer(device)
     this.#unsubscribeRequest = device.onConversationRequest((request) => {
       void this.handleRequest(request)

@@ -83,6 +83,7 @@ export interface RealtimeAudioSession {
 
 export type RealtimeWebRtcSessionOptions = {
   voice?: string
+  prompt?: string
   startTimeoutMilliseconds?: number
 }
 
@@ -377,6 +378,7 @@ export class RealtimeWebRtcSession
       const answerSdp = await this.#appServer.startRealtime({
         sdp: offerSdp,
         ...(this.#options.voice ? { voice: this.#options.voice } : {}),
+        ...(this.#options.prompt ? { prompt: this.#options.prompt } : {}),
       })
       await peer.setRemoteDescription({ type: 'answer', sdp: answerSdp })
       this.#sender = new OpusRtpAudioSender(localTrack, {

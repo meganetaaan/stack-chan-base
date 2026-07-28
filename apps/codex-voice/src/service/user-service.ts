@@ -2,10 +2,8 @@ export type StackChanUserServiceOptions = {
   description?: string
   nodePath: string
   cliPath: string
-  cwd: string
   deviceId: string
   socketPath?: string
-  voice?: string
 }
 
 export const GENERATED_UNIT_MARKER =
@@ -19,12 +17,10 @@ export function buildStackChanUserServiceUnit(
   const args = [
     options.nodePath,
     options.cliPath,
-    '--cwd',
-    options.cwd,
+    'run',
     '--device-id',
     options.deviceId,
     ...(options.socketPath ? ['--socket', options.socketPath] : []),
-    ...(options.voice ? ['--voice', options.voice] : []),
   ]
   return `${GENERATED_UNIT_MARKER}
 [Unit]
@@ -32,7 +28,6 @@ Description=${options.description ?? 'Stack-chan Codex voice bridge'}
 
 [Service]
 Type=simple
-WorkingDirectory=${systemdPath(options.cwd)}
 ExecStart=${args.map(systemdQuote).join(' ')}
 Restart=on-failure
 RestartSec=2
@@ -72,20 +67,4 @@ function systemdQuote(value: string): string {
     .replaceAll('$', () => '$$')
     .replaceAll('%', '%%')
   return `"${escaped}"`
-}
-
-function systemdPath(value: string): string {
-  if (!value.startsWith('/')) {
-    throw new Error('WorkingDirectory must be an absolute path')
-  }
-  return value
-    .replaceAll('\\', '\\x5c')
-    .replaceAll(' ', '\\x20')
-    .replaceAll('"', '\\x22')
-    .replaceAll("'", '\\x27')
-    .replaceAll('\n', '\\n')
-    .replaceAll('\r', '\\r')
-    .replaceAll('\t', '\\t')
-    .replaceAll('$', '\\x24')
-    .replaceAll('%', '%%')
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -15,7 +15,6 @@ test('systemd unit pins the USB device ID and keeps Realtime gesture-triggered',
   const unit = buildStackChanUserServiceUnit({
     nodePath: '/opt/node/bin/node',
     cliPath: '/opt/stack chan/dist/src/cli.js',
-    cwd: '/workspace/project',
     deviceId: 'STACKCHAN-PRIMARY',
   })
 
@@ -23,6 +22,9 @@ test('systemd unit pins the USB device ID and keeps Realtime gesture-triggered',
   assert.match(unit, /--device-id" "STACKCHAN-PRIMARY"/)
   assert.doesNotMatch(unit, /ttyACM/)
   assert.doesNotMatch(unit, /start-immediately/)
+  assert.doesNotMatch(unit, /WorkingDirectory/)
+  assert.doesNotMatch(unit, /--cwd|--voice|--thread/)
+  assert.match(unit, /cli\.js" "run" "--device-id"/)
   assert.match(unit, /Restart=on-failure/)
   assert.match(unit, /TimeoutStopSec=15/)
 })
@@ -31,14 +33,9 @@ test('systemd unit quotes paths and escapes specifier expansion', () => {
   const unit = buildStackChanUserServiceUnit({
     nodePath: '/opt/node $current/bin/node',
     cliPath: '/opt/stack%20chan/cli.js',
-    cwd: '/workspace/a b%$"voice"',
     deviceId: 'id%$"',
   })
 
-  assert.match(
-    unit,
-    /WorkingDirectory=\/workspace\/a\\x20b%%\\x24\\x22voice\\x22/,
-  )
   assert.match(unit, /\$\$current/)
   assert.match(unit, /stack%%20chan/)
   assert.match(unit, /id%%\$\$\\"/)
@@ -51,15 +48,12 @@ test('generated systemd unit passes the installed systemd parser', async (contex
   }
   const directory = await mkdtemp(join(tmpdir(), 'stackchan-user-service-'))
   try {
-    const workingDirectory = join(directory, 'a b%$"voice"')
-    await mkdir(workingDirectory)
     const unitPath = join(directory, 'stackchan-codex-voice.service')
     await writeFile(
       unitPath,
       buildStackChanUserServiceUnit({
         nodePath: process.execPath,
         cliPath: process.execPath,
-        cwd: workingDirectory,
         deviceId: 'STACKCHAN-PRIMARY',
       }),
     )

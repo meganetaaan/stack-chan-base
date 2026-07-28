@@ -2,7 +2,7 @@
 
 更新日: 2026-07-25
 
-状態: 会話の常駐運用、開始終了Tone、MIC停止再送を実装済み、30分安定性評価と表情ツールは未実施
+状態: workspace設定、状態取得ツール、会話の常駐運用、開始終了Tone、MIC停止再送を実装済み、30分安定性評価と表情ツールは未実施
 
 ## 実装した利用方法
 
@@ -19,7 +19,12 @@ Toneはブリッジが24 kHzのPCMとして生成し、既存のUSBスピーカ�
 MOD側のTone APIは使わず、USB音声と別のAudioOutが同時に物理スピーカーを所有する競合を避ける。
 
 一つのサービスプロセス内では同じCodex threadを再利用する。
-サービスを再起動し、`--thread`を指定しなかった場合は新しいthreadを開始する。
+サービスを再起動すると新しいthreadを開始し、thread IDを設定やCLIから注入しない。
+
+会話設定はアクティブworkspaceの`.stackchan/session.toml`と
+`.stackchan/realtime-prompt.md`から読み込む。
+workspaceルートの`AGENTS.md`と`.agents/skills`はCodex自身に発見させる。
+`--cwd`、`--voice`、`--thread`による一時上書きは行わない。
 
 ## 会話状態
 
@@ -64,6 +69,7 @@ wire形式は[`contracts/usb-cdc-v2`](../../../contracts/usb-cdc-v2/README.md)�
 
 CLIはバックグラウンドへforkせず、foregroundのままsystemdに監視させる。
 インストーラは指定した`/dev/ttyACM0`からUSB serial numberを取得し、unitの`--device-id`へ固定する。
+unitへcwdやvoiceを埋め込まず、ユーザー領域で選択されたアクティブworkspaceを起動時に読む。
 同型のCoreS3が複数あっても、指定IDが見つからない場合は別の機体へフォールバックしない。
 
 unitは`Restart=on-failure`、`RestartSec=2`、`TimeoutStopSec=15`を設定する。
@@ -107,7 +113,14 @@ dock appは同一streamの`MIC_STOP`を500ミリ秒ごとに再送し、Firmware
 
 30分のsoak test、USB物理抜線後の再接続、app-server実プロセス再起動は未実施である。
 
-## 未実装の表情ツール
+## ツール
+
+読み取り専用の`stackchan.get_status`をapp-server dynamic toolとして固定登録し、
+USB接続、会話状態、desired stateを返す。
+workspaceローカルの`.agents/skills/stackchan/SKILL.md`は利用方針だけを保持し、
+任意のツール定義や実行コードは読み込まない。
+
+### 未実装の表情ツール
 
 表情変更と安全なモーションのCodex tool化は、この実装範囲に含めていない。
 次の段階では、app-serverのdynamic toolまたはRealtime data channelのfunction toolを使い、`robot.action.request`へ正規化する。

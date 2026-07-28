@@ -159,12 +159,20 @@ describe('RealtimeWebRtcSession transport liveness', () => {
       startRealtime: vi.fn(async () => 'v=0\r\n'),
       stopRealtime: vi.fn(async () => undefined),
     } as unknown as CodexAppServer
-    const session = new RealtimeWebRtcSession(appServer)
+    const session = new RealtimeWebRtcSession(appServer, {
+      voice: 'juniper',
+      prompt: '日本語で話してください。',
+    })
     sessions.push(session)
     const received = new Promise<import('../src/types.js').PcmChunk>((resolve) => {
       session.on('audio', resolve)
     })
     await session.start()
+    expect(appServer.startRealtime).toHaveBeenCalledWith({
+      sdp: 'v=0\r\n',
+      voice: 'juniper',
+      prompt: '日本語で話してください。',
+    })
     const encoder = new OpusEncoder(48_000, 1)
     const samples = Int16Array.from({ length: 960 }, (_, index) =>
       Math.round(Math.sin(index / 8) * 4_000),

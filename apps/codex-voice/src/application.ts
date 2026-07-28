@@ -8,17 +8,26 @@ import {
   type RpcNotification,
   type RpcServerRequest,
 } from './codex/rpc.js'
-import type { CliOptions } from './cli-options.js'
+import type { RunOptions } from './cli-options.js'
 import { ConversationSessionController } from './conversation/session-controller.js'
 import {
   ExponentialRetryBackoff,
   NonRetryableError,
   retryDisposition,
 } from './retry-policy.js'
+import {
+  STACKCHAN_DYNAMIC_TOOLS,
+  StackChanToolHandler,
+} from './tools/stackchan.js'
 import { UsbStackChanDevice } from './usb/device.js'
+import type { LoadedWorkspace } from './workspace.js'
 
-export async function runApplication(options: CliOptions, signal: AbortSignal): Promise<void> {
-  let threadId = options.threadId
+export type ApplicationOptions = RunOptions & {
+  workspace: LoadedWorkspace
+}
+
+export async function runApplication(options: ApplicationOptions, signal: AbortSignal): Promise<void> {
+  let threadId: string | undefined
   const usbBackoff = new ExponentialRetryBackoff()
 
   while (!signal.aborted) {
@@ -36,7 +45,11 @@ export async function runApplication(options: CliOptions, signal: AbortSignal): 
       console.log(
         `CoreS3 USB接続: maxPayload=${capabilities.maxPayload} event=${capabilities.event} status=${capabilities.statusIcon} statusExtended=${capabilities.statusExtended}`,
       )
-      controller = new ConversationSessionController(device, options.voice)
+      controller = new ConversationSessionController(
+        device,
+        options.workspace.session.voice,
+        { realtimePrompt: options.workspace.realtimePrompt },
+      )
       if (options.startImmediately) await controller.activate()
 
       const appServerBackoff = new ExponentialRetryBackoff()
@@ -45,6 +58,7 @@ export async function runApplication(options: CliOptions, signal: AbortSignal): 
         let daemon: CodexDaemonConnection | undefined
         let appServer: CodexAppServer | undefined
         let approvalManager: ApprovalManager | undefined
+        let toolHandler: StackChanToolHandler | undefined
         let onServerRequest: ((request: RpcServerRequest) => void) | undefined
         let onNotification: ((notification: RpcNotification) => void) | undefined
         let terminalFailure = false
@@ -54,23 +68,41 @@ export async function runApplication(options: CliOptions, signal: AbortSignal): 
           const initialized = await appServer.initialize()
           console.log(`Codex app-server接続: ${initialized.userAgent}`)
           const voices = await appServer.listRealtimeVoices()
-          if (options.voice && !voices.v1.includes(options.voice)) {
+          if (
+            options.workspace.session.voice &&
+            !voices.v1.includes(options.workspace.session.voice)
+          ) {
             throw new NonRetryableError(
               'configuration',
-              `Realtime v3 voice "${options.voice}" はapp-serverで利用できません`,
+              `Realtime v3 voice "${options.workspace.session.voice}" はapp-serverで利用できません`,
             )
           }
           threadId = await appServer.openThread({
-            cwd: options.cwd,
+            cwd: options.workspace.root,
             ...(threadId ? { threadId } : {}),
+            ...(!threadId ? { dynamicTools: STACKCHAN_DYNAMIC_TOOLS } : {}),
           })
           console.log(`Codex thread: ${threadId}`)
 
           approvalManager = new ApprovalManager(daemon.connection, threadId)
+          toolHandler = new StackChanToolHandler(
+            daemon.connection,
+            threadId,
+            () => ({
+              connected: device.connected,
+              conversationState: controller!.state,
+              desired: controller!.desired,
+            }),
+          )
           const manager = approvalManager
+          const tools = toolHandler
           onServerRequest = (request) => {
-            void manager.handleServerRequest(request).catch((error) => {
-              console.error(`承認server requestの処理に失敗: ${errorMessage(error)}`)
+            const task =
+              request.method === 'item/tool/call'
+                ? tools.handleServerRequest(request)
+                : manager.handleServerRequest(request)
+            void task.catch((error) => {
+              console.error(`server requestの処理に失敗: ${errorMessage(error)}`)
             })
           }
           onNotification = (notification) => {

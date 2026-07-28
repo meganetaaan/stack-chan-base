@@ -50,7 +50,15 @@ test('app-server initialization opts into experimental APIs without attestation 
   })
 
   const threadData = once(toServer, 'data')
-  const opened = appServer.openThread({ cwd: '/workspace' })
+  const dynamicTools = [
+    {
+      type: 'function' as const,
+      name: 'status',
+      description: 'status',
+      inputSchema: { type: 'object' },
+    },
+  ]
+  const opened = appServer.openThread({ cwd: '/workspace', dynamicTools })
   const [threadLine] = await threadData
   const threadRequest = JSON.parse(String(threadLine)) as {
     id: number
@@ -63,11 +71,16 @@ test('app-server initialization opts into experimental APIs without attestation 
       realtime_conversation: true,
     },
   })
+  assert.deepEqual(threadRequest.params.dynamicTools, dynamicTools)
   fromServer.write(`${JSON.stringify({ id: threadRequest.id, result: { thread: { id: 'thread-1' } } })}\n`)
   assert.equal(await opened, 'thread-1')
 
   const realtimeData = once(toServer, 'data')
-  const realtimeStarted = appServer.startRealtime({ sdp: 'v=0\r\no=stackchan-offer\r\n' })
+  const realtimeStarted = appServer.startRealtime({
+    sdp: 'v=0\r\no=stackchan-offer\r\n',
+    voice: 'juniper',
+    prompt: '日本語で話してください。',
+  })
   const [realtimeLine] = await realtimeData
   const realtimeRequest = JSON.parse(String(realtimeLine)) as {
     id: number
@@ -78,6 +91,8 @@ test('app-server initialization opts into experimental APIs without attestation 
   assert.equal(realtimeRequest.params.version, 'v3')
   assert.equal(realtimeRequest.params.outputModality, 'audio')
   assert.equal(realtimeRequest.params.includeStartupContext, true)
+  assert.equal(realtimeRequest.params.voice, 'juniper')
+  assert.equal(realtimeRequest.params.prompt, '日本語で話してください。')
   assert.deepEqual(realtimeRequest.params.transport, {
     type: 'webrtc',
     sdp: 'v=0\r\no=stackchan-offer\r\n',

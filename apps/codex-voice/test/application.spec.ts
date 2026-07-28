@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CliOptions } from '../src/cli-options.js'
+import type { ApplicationOptions } from '../src/application.js'
 
 const harness = vi.hoisted(() => ({
   abortController: undefined as AbortController | undefined,
@@ -12,6 +12,9 @@ const harness = vi.hoisted(() => ({
   >,
   declineCalls: 0,
   delayCalls: [] as number[],
+  openThreadOptions: [] as Array<Record<string, unknown>>,
+  controllerPrompts: [] as Array<string | undefined>,
+  controllerVoices: [] as Array<string | undefined>,
   suspendCalls: 0,
   usbCloses: 0,
   usbConnects: 0,
@@ -109,7 +112,8 @@ vi.mock('../src/codex/app-server.js', () => ({
       }
     }
 
-    async openThread(): Promise<string> {
+    async openThread(options: Record<string, unknown>): Promise<string> {
+      harness.openThreadOptions.push(options)
       return this.threadId
     }
 
@@ -171,8 +175,14 @@ vi.mock('../src/conversation/session-controller.js', () => ({
       disconnect(error?: Error): void
     }
 
-    constructor(device: { disconnect(error?: Error): void }) {
+    constructor(
+      device: { disconnect(error?: Error): void },
+      voice?: string,
+      options?: { realtimePrompt?: string },
+    ) {
       this.device = device
+      harness.controllerVoices.push(voice)
+      harness.controllerPrompts.push(options?.realtimePrompt)
     }
 
     async activate(): Promise<void> {
@@ -207,8 +217,16 @@ vi.mock('../src/conversation/session-controller.js', () => ({
 
 import { runApplication } from '../src/application.js'
 
-const OPTIONS: CliOptions = {
-  cwd: '/workspace',
+const OPTIONS: ApplicationOptions = {
+  workspace: {
+    root: '/workspace',
+    configPath: '/workspace/.stackchan/session.toml',
+    realtimePromptPath: '/workspace/.stackchan/realtime-prompt.md',
+    realtimePrompt: '日本語で話してください。',
+    session: {
+      schemaVersion: 1,
+    },
+  },
 }
 
 describe('application connection supervision', () => {
@@ -221,6 +239,9 @@ describe('application connection supervision', () => {
     harness.controllerOutcomes = []
     harness.declineCalls = 0
     harness.delayCalls = []
+    harness.openThreadOptions = []
+    harness.controllerPrompts = []
+    harness.controllerVoices = []
     harness.suspendCalls = 0
     harness.usbCloses = 0
     harness.usbConnects = 0
@@ -236,6 +257,17 @@ describe('application connection supervision', () => {
 
     expect(harness.controllerActivations).toBe(0)
     expect(harness.controllerAttachments).toBe(1)
+    expect(harness.controllerPrompts).toEqual(['日本語で話してください。'])
+    expect(harness.controllerVoices).toEqual([undefined])
+    expect(harness.openThreadOptions[0]).toMatchObject({
+      cwd: '/workspace',
+      dynamicTools: [
+        {
+          type: 'namespace',
+          name: 'stackchan',
+        },
+      ],
+    })
   })
 
   it('supports explicit compatibility startup without changing the default', async () => {
@@ -255,7 +287,16 @@ describe('application connection supervision', () => {
 
     await expect(
       runApplication(
-        { ...OPTIONS, voice: 'missing-voice' },
+        {
+          ...OPTIONS,
+          workspace: {
+            ...OPTIONS.workspace,
+            session: {
+              schemaVersion: 1,
+              voice: 'missing-voice',
+            },
+          },
+        },
         harness.abortController!.signal,
       ),
     ).rejects.toThrow('Realtime v3 voice "missing-voice"')
@@ -280,6 +321,12 @@ describe('application connection supervision', () => {
     expect(harness.delayCalls).toEqual([500, 1_000])
     expect(harness.suspendCalls).toBe(2)
     expect(harness.declineCalls).toBe(1)
+    expect(harness.openThreadOptions[0]).toHaveProperty('dynamicTools')
+    expect(harness.openThreadOptions[1]).toMatchObject({
+      cwd: '/workspace',
+      threadId: 'thread-test',
+    })
+    expect(harness.openThreadOptions[1]).not.toHaveProperty('dynamicTools')
   })
 
   it('recreates the conversation controller only when USB disconnects', async () => {

@@ -33,18 +33,23 @@ const defaultLogger: AudioBridgeLogger = {
 export type RealtimeAudioSessionFactory = (
   appServer: CodexAppServer,
   voice: string | undefined,
+  prompt: string | undefined,
 ) => RealtimeAudioSession
 
 export type RealtimeAudioState = 'listening' | 'recognizing' | 'speaking'
 export type RealtimeAudioStateSink = (state: RealtimeAudioState) => Promise<void>
 
-const defaultSessionFactory: RealtimeAudioSessionFactory = (appServer, voice) =>
-  new RealtimeWebRtcSession(appServer, voice ? { voice } : {})
+const defaultSessionFactory: RealtimeAudioSessionFactory = (appServer, voice, prompt) =>
+  new RealtimeWebRtcSession(appServer, {
+    ...(voice ? { voice } : {}),
+    ...(prompt ? { prompt } : {}),
+  })
 
 export class RealtimeAudioBridge {
   readonly #appServer: CodexAppServer
   readonly #device: StackChanDevice
   readonly #voice: string | undefined
+  readonly #prompt: string | undefined
   readonly #logger: AudioBridgeLogger
   readonly #sessionFactory: RealtimeAudioSessionFactory
   readonly #stateSink: RealtimeAudioStateSink
@@ -73,10 +78,12 @@ export class RealtimeAudioBridge {
     logger: AudioBridgeLogger = defaultLogger,
     sessionFactory: RealtimeAudioSessionFactory = defaultSessionFactory,
     stateSink: RealtimeAudioStateSink = (state) => device.setConversationState(state),
+    prompt?: string,
   ) {
     this.#appServer = appServer
     this.#device = device
     this.#voice = voice
+    this.#prompt = prompt
     this.#logger = logger
     this.#sessionFactory = sessionFactory
     this.#stateSink = stateSink
@@ -85,7 +92,7 @@ export class RealtimeAudioBridge {
   async run(signal: AbortSignal): Promise<void> {
     if (this.#running) throw new Error('realtime audio bridge is already running')
     this.#running = true
-    const session = this.#sessionFactory(this.#appServer, this.#voice)
+    const session = this.#sessionFactory(this.#appServer, this.#voice, this.#prompt)
     this.#session = session
     const onNotification = (notification: RpcNotification) => this.#handleNotification(notification)
     const onSessionAudio = (chunk: PcmChunk) => this.#handleOutputAudio(chunk)
