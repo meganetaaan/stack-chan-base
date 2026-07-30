@@ -94,15 +94,7 @@ export class CodexAppServer extends EventEmitter {
     if (!this.#initialized) throw new Error('app-server must be initialized first')
     const common = {
       cwd: options.cwd,
-      approvalPolicy: {
-        granular: {
-          sandbox_approval: true,
-          rules: false,
-          skill_approval: false,
-          request_permissions: false,
-          mcp_elicitations: false,
-        },
-      },
+      approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
       sandbox: 'workspace-write',
       config: {
