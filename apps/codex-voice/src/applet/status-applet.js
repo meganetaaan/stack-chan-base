@@ -65,6 +65,9 @@ let refreshInFlight = false
 let latestStatus = null
 let errorTimer = 0
 let visibleError = null
+let renderedDeviceMenuSignature = null
+let deferredDeviceMenuStatus = null
+let deviceMenuRebuildSource = 0
 
 serviceItem.connect('toggled', () => {
   if (applyingStatus || requestInFlight || !latestStatus?.service?.installed) return
@@ -74,6 +77,18 @@ serviceItem.connect('toggled', () => {
 refreshItem.connect('activate', () => refreshStatus())
 quitItem.connect('activate', () => Gtk.main_quit())
 menu.connect('show', () => refreshStatus())
+deviceMenu.connect('unmap', () => {
+  if (deferredDeviceMenuStatus === null || deviceMenuRebuildSource !== 0) return
+  deviceMenuRebuildSource = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+    deviceMenuRebuildSource = 0
+    if (deviceMenu.get_mapped()) return GLib.SOURCE_REMOVE
+    const status = deferredDeviceMenuStatus
+    if (status === null) return GLib.SOURCE_REMOVE
+    deferredDeviceMenuStatus = null
+    updateDeviceMenu(status)
+    return GLib.SOURCE_REMOVE
+  })
+})
 
 indicator.set_menu(menu)
 menu.show_all()
@@ -198,7 +213,7 @@ function applyStatus(status) {
   try {
     serviceItem.set_active(status.service.active)
     setControlsSensitive(true)
-    rebuildDeviceMenu(status)
+    updateDeviceMenu(status)
 
     const selected = status.devices.find((device) => device.selected)
     const serviceText = !status.service.installed
@@ -228,6 +243,29 @@ function applyStatus(status) {
   } finally {
     applyingStatus = false
   }
+}
+
+function updateDeviceMenu(status) {
+  const signature = JSON.stringify([
+    status.selectedDeviceId,
+    status.devices.map((device) => [
+      device.path,
+      device.deviceId ?? null,
+      device.selected,
+      device.selectable,
+    ]),
+  ])
+  if (signature === renderedDeviceMenuSignature) {
+    deferredDeviceMenuStatus = null
+    return
+  }
+  if (deviceMenu.get_mapped()) {
+    deferredDeviceMenuStatus = status
+    return
+  }
+  deferredDeviceMenuStatus = null
+  rebuildDeviceMenu(status)
+  renderedDeviceMenuSignature = signature
 }
 
 function rebuildDeviceMenu(status) {

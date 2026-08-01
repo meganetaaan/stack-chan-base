@@ -297,11 +297,14 @@ Commands:
   workspace current               選択中workspaceを表示
   workspace apply                 選択中workspaceをserviceへ再反映
   voice list [--socket <path>]     利用可能なRealtime voiceを表示
-  status [--json]                  serviceとUSBデバイスの状態を表示
-  service start                    Codex voice serviceをON
-  service stop                     Codex voice serviceをOFF
-  device list [--json]             接続中のCoreS3を表示
-  device use <device-id>           接続先CoreS3を選択
+  status [--json] [--unit-name <unit>] [--device-selection <path>]
+                                      serviceとUSBデバイスの状態を表示
+  service start [--unit-name <unit>]  Codex voice serviceをON
+  service stop [--unit-name <unit>]   Codex voice serviceをOFF
+  device list [--json] [--device-selection <path>]
+                                      接続中のCoreS3を表示
+  device use <device-id> [--unit-name <unit>] [--device-selection <path>]
+                                      接続先CoreS3を選択
 
 Run options:
   --port <path>       CoreS3 USB serial port（--device-idと排他）

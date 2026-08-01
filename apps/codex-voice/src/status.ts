@@ -43,25 +43,32 @@ export function buildDockStatus(
   return {
     service,
     selectedDeviceId: selectedDeviceId ?? null,
-    devices: devices.map((device) => ({
-      ...device,
-      selected:
-        device.deviceId !== undefined && device.deviceId === selectedDeviceId,
-      selectable: device.deviceId !== undefined,
-    })),
+    devices: buildDockDevices(devices, selectedDeviceId),
   }
+}
+
+export function buildDockDevices(
+  devices: StackChanDeviceInfo[],
+  selectedDeviceId: string | undefined,
+): DockDeviceStatus[] {
+  return devices.map((device) => ({
+    ...device,
+    selected:
+      device.deviceId !== undefined && device.deviceId === selectedDeviceId,
+    selectable: device.deviceId !== undefined,
+  }))
 }
 
 export function formatDockStatus(status: DockStatus): string {
   const lines = [
-    `service: ${status.service.activeState} (${status.service.subState})`,
-    `selected device: ${status.selectedDeviceId ?? '(not selected)'}`,
-    'connected devices:',
+    `サービス: ${status.service.activeState} (${status.service.subState})`,
+    `選択中のデバイス: ${status.selectedDeviceId ?? '未選択'}`,
+    '接続中のデバイス:',
   ]
-  if (status.devices.length === 0) lines.push('  (none)')
+  if (status.devices.length === 0) lines.push('  （なし）')
   for (const device of status.devices) {
     lines.push(
-      `  ${device.selected ? '*' : '-'} ${device.path}  ${device.deviceId ?? '(serial number unavailable)'}`,
+      `  ${device.selected ? '*' : '-'} ${device.path}  ${device.deviceId ?? '(USB serial numberなし)'}`,
     )
   }
   return lines.join('\n')

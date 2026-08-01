@@ -22,12 +22,16 @@ function serviceStatus(active: boolean): UserServiceStatus {
   }
 }
 
-function dependencies(active: boolean) {
+function dependencies(activeBefore: boolean, activeAfter = activeBefore) {
   const writes: Array<{ deviceId: string; path: string | undefined }> = []
   const tryRestarts: string[] = []
+  const statusQueries: string[] = []
   const value: DeviceManagerDependencies = {
     discoverDevices: async () => DEVICES,
-    queryServiceStatus: async () => serviceStatus(active),
+    queryServiceStatus: async (unitName) => {
+      statusQueries.push(unitName)
+      return serviceStatus(statusQueries.length === 1 ? activeBefore : activeAfter)
+    },
     writeSelection: async (deviceId, path) => {
       writes.push({ deviceId, path })
     },
@@ -35,10 +39,10 @@ function dependencies(active: boolean) {
       tryRestarts.push(unitName)
     },
   }
-  return { value, writes, tryRestarts }
+  return { value, writes, tryRestarts, statusQueries }
 }
 
-test('selecting a device while the service is OFF persists it without starting', async () => {
+test('selecting a device while the service is OFF persists it and try-restart leaves it OFF', async () => {
   const observed = dependencies(false)
   const result = await selectDockDevice(
     {
@@ -59,6 +63,10 @@ test('selecting a device while the service is OFF persists it without starting',
     path: '/tmp/selected-device',
   }])
   assert.deepEqual(observed.tryRestarts, ['stackchan-codex-voice.service'])
+  assert.deepEqual(observed.statusQueries, [
+    'stackchan-codex-voice.service',
+    'stackchan-codex-voice.service',
+  ])
 })
 
 test('selecting a device while the service is ON restarts the same unit once', async () => {
@@ -73,6 +81,20 @@ test('selecting a device while the service is ON restarts the same unit once', a
 
   assert.equal(result.serviceRestarted, true)
   assert.deepEqual(observed.tryRestarts, ['custom.service'])
+})
+
+test('device selection reports the service state observed after try-restart', async () => {
+  const observed = dependencies(true, false)
+  const result = await selectDockDevice(
+    {
+      deviceId: 'STACKCHAN-PRIMARY',
+      unitName: 'stackchan-codex-voice.service',
+    },
+    observed.value,
+  )
+
+  assert.equal(result.serviceRestarted, false)
+  assert.equal(observed.statusQueries.length, 2)
 })
 
 test('selecting a device before service installation only persists the choice', async () => {

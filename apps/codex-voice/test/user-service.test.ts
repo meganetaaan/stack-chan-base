@@ -59,7 +59,9 @@ test('status applet unit launches GJS against the managed voice unit', () => {
   assert.match(unit, /"--unit-name" "stackchan-codex-voice\.service"/)
   assert.match(unit, /"--device-selection" "\/home\/user\/\.config/)
   assert.match(unit, /Restart=on-failure/)
-  assert.match(unit, /WantedBy=default\.target/)
+  assert.match(unit, /After=graphical-session\.target/)
+  assert.match(unit, /PartOf=graphical-session\.target/)
+  assert.match(unit, /WantedBy=graphical-session\.target/)
 })
 
 test('applet installation can identify the exact managed device selection file', () => {
@@ -84,6 +86,13 @@ test('applet installation can identify the exact managed device selection file',
   assert.equal(
     stackChanUserServiceUsesDeviceSelection(
       `${GENERATED_UNIT_MARKER}\nExecStart="node" "cli" "run" "--device-id" "OLD"\n`,
+      selectionPath,
+    ),
+    false,
+  )
+  assert.equal(
+    stackChanUserServiceUsesDeviceSelection(
+      unit.replace(`${GENERATED_UNIT_MARKER}\n`, ''),
       selectionPath,
     ),
     false,

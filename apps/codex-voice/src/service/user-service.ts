@@ -67,6 +67,8 @@ export function buildStackChanStatusAppletServiceUnit(
   return `${GENERATED_UNIT_MARKER}
 [Unit]
 Description=${options.description ?? 'Stack-chan Codex voice status applet'}
+After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
@@ -75,7 +77,7 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 `
 }
 

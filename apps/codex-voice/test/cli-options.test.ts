@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { resolve } from 'node:path'
 import test from 'node:test'
 import { parseCliCommand } from '../src/cli-options.js'
 
@@ -60,18 +61,29 @@ test('run rejects ambiguous simultaneous port and device ID selectors', () => {
       ]),
     /mutually exclusive/,
   )
+  assert.throws(
+    () =>
+      parseCliCommand([
+        'run',
+        '--port',
+        '/dev/ttyACM0',
+        '--device-selection',
+        '/tmp/selected-device',
+      ]),
+    /mutually exclusive/,
+  )
 })
 
-test('run accepts a service-managed device selection file', () => {
+test('run resolves a relative service-managed device selection file', () => {
   assert.deepEqual(
     parseCliCommand([
       'run',
       '--device-selection',
-      '/tmp/selected-device',
+      'config/selected-device',
     ]),
     {
       kind: 'run',
-      options: { deviceSelectionPath: '/tmp/selected-device' },
+      options: { deviceSelectionPath: resolve('config/selected-device') },
     },
   )
 })

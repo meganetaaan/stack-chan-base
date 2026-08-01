@@ -25,6 +25,12 @@ const PORTS = [
     productId: '5678',
     serialNumber: 'NOT-STACKCHAN',
   },
+  {
+    path: '/dev/ttyACM2',
+    vendorId: '303a',
+    productId: '1001',
+    serialNumber: undefined,
+  },
 ]
 
 test('USB device ID pins discovery to the requested CoreS3', () => {
@@ -47,6 +53,10 @@ test('USB discovery exposes all compatible CoreS3 devices in stable path order',
     {
       path: '/dev/ttyACM1',
       deviceId: 'STACKCHAN-SECONDARY',
+    },
+    {
+      path: '/dev/ttyACM2',
+      deviceId: undefined,
     },
   ])
 })

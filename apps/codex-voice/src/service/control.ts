@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { validateSystemdUnitName } from './user-service.js'
 
 export const DEFAULT_VOICE_UNIT_NAME = 'stackchan-codex-voice.service'
+const SYSTEMCTL_TIMEOUT_MS = 10_000
 
 export type UserServiceStatus = {
   unitName: string
@@ -69,7 +70,7 @@ export async function startUserService(
 ): Promise<void> {
   const validated = validateSystemdUnitName(unitName)
   await runSystemctl(['--user', 'start', validated])
-  await runSystemctl(['--user', 'is-active', '--quiet', validated])
+  await assertUserServiceActive(validated, runSystemctl)
 }
 
 export async function stopUserService(
@@ -85,7 +86,7 @@ export async function restartUserService(
 ): Promise<void> {
   const validated = validateSystemdUnitName(unitName)
   await runSystemctl(['--user', 'restart', validated])
-  await runSystemctl(['--user', 'is-active', '--quiet', validated])
+  await assertUserServiceActive(validated, runSystemctl)
 }
 
 export async function tryRestartUserService(
@@ -106,6 +107,20 @@ export async function runSystemctlCommand(args: string[]): Promise<void> {
   }
 }
 
+async function assertUserServiceActive(
+  unitName: string,
+  runSystemctl: SystemctlRunner,
+): Promise<void> {
+  try {
+    await runSystemctl(['--user', 'is-active', '--quiet', unitName])
+  } catch (error) {
+    throw new Error(
+      `systemd user serviceがactiveになりませんでした: ${unitName}。systemctl --user status ${unitName} または journalctl --user-unit ${unitName} を確認してください`,
+      { cause: error },
+    )
+  }
+}
+
 async function runSystemctlQuery(
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -120,6 +135,11 @@ async function spawnSystemctl(
     const child = spawn('systemctl', args, {
       stdio: output === 'inherit' ? 'inherit' : ['ignore', 'pipe', 'pipe'],
     })
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGKILL')
+    }, SYSTEMCTL_TIMEOUT_MS)
     let stdout = ''
     let stderr = ''
     if (output === 'capture') {
@@ -132,8 +152,20 @@ async function spawnSystemctl(
         stderr += chunk
       })
     }
-    child.once('error', reject)
+    child.once('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
     child.once('exit', (code, signal) => {
+      clearTimeout(timer)
+      if (timedOut) {
+        reject(
+          new Error(
+            `systemctl ${args.join(' ')} timed out after ${SYSTEMCTL_TIMEOUT_MS} ms`,
+          ),
+        )
+        return
+      }
       if (code === null) {
         reject(new Error(`systemctl ${args.join(' ')} stopped by ${String(signal)}`))
         return

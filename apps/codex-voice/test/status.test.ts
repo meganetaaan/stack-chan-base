@@ -29,7 +29,7 @@ test('dock status marks only the connected selected device', () => {
     { selected: true, selectable: true },
     { selected: false, selectable: false },
   ])
-  assert.match(formatDockStatus(status), /service: active \(running\)/)
+  assert.match(formatDockStatus(status), /サービス: active \(running\)/)
   assert.match(formatDockStatus(status), /\* \/dev\/ttyACM0/)
 })
 
@@ -38,5 +38,17 @@ test('dock status preserves an unavailable selected device for the UI', () => {
   assert.equal(status.selectedDeviceId, 'STACKCHAN-OFFLINE')
   assert.deepEqual(status.devices, [])
   assert.match(formatDockStatus(status), /STACKCHAN-OFFLINE/)
-  assert.match(formatDockStatus(status), /\(none\)/)
+  assert.match(formatDockStatus(status), /（なし）/)
+})
+
+test('dock status represents the first-run state without a persisted selection', () => {
+  const status = buildDockStatus(
+    SERVICE,
+    [{ path: '/dev/ttyACM0', deviceId: 'STACKCHAN-PRIMARY' }],
+    undefined,
+  )
+
+  assert.equal(status.selectedDeviceId, null)
+  assert.equal(status.devices[0]?.selected, false)
+  assert.match(formatDockStatus(status), /選択中のデバイス: 未選択/)
 })

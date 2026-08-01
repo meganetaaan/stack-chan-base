@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -11,6 +10,7 @@ import {
   deviceSelectionPath,
   writeSelectedDeviceId,
 } from '../device-selection.js'
+import { isNodeError, runSystemctl } from '../node-utils.js'
 import { discoverStackChanDeviceId } from '../usb/device.js'
 import {
   buildStackChanUserServiceUnit,
@@ -68,11 +68,11 @@ async function main(): Promise<void> {
       : join(homedir(), '.config')
   const unitPath = join(configHome, 'systemd', 'user', unitName)
   await assertGeneratedOrMissing(unitPath)
-  await writeSelectedDeviceId(deviceId, selectionPath)
   await mkdir(dirname(unitPath), { recursive: true })
   const temporaryPath = `${unitPath}.tmp-${process.pid}`
   await writeFile(temporaryPath, unit, { encoding: 'utf8', mode: 0o644 })
   await rename(temporaryPath, unitPath)
+  await writeSelectedDeviceId(deviceId, selectionPath)
   await enableAndStartUserService(unitName, runSystemctl)
   console.log(
     `systemd user serviceを導入しました: ${unitName} deviceId=${deviceId} workspace=${workspace.root}`,
@@ -84,13 +84,7 @@ async function assertGeneratedOrMissing(path: string): Promise<void> {
   try {
     current = await readFile(path, 'utf8')
   } catch (error) {
-    if (
-      error instanceof Error &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
-      return
-    }
+    if (isNodeError(error, 'ENOENT')) return
     throw error
   }
   if (!current.startsWith(GENERATED_UNIT_MARKER)) {
@@ -98,26 +92,6 @@ async function assertGeneratedOrMissing(path: string): Promise<void> {
       `既存のunitはこのインストーラの生成物ではないため上書きしません: ${path}`,
     )
   }
-}
-
-async function runSystemctl(args: string[]): Promise<void> {
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn('systemctl', args, { stdio: 'inherit' })
-    child.once('error', reject)
-    child.once('exit', (code, signal) => {
-      if (code === 0) {
-        resolvePromise()
-        return
-      }
-      reject(
-        new Error(
-          `systemctl ${args.join(' ')} failed (${
-            signal ? `signal ${signal}` : `exit ${String(code)}`
-          })`,
-        ),
-      )
-    })
-  })
 }
 
 const HELP = `Usage: stackchan-codex-voice-install-service [options]

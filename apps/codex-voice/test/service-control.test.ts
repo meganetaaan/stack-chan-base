@@ -79,3 +79,12 @@ test('service controls verify starts and restarts while stop stays off', async (
     ['--user', 'try-restart', 'stackchan-codex-voice.service'],
   ])
 })
+
+test('service activation failure points operators to status and journal logs', async () => {
+  await assert.rejects(
+    startUserService('stackchan-codex-voice.service', async (args) => {
+      if (args.includes('is-active')) throw new Error('exit 3')
+    }),
+    /activeになりませんでした: stackchan-codex-voice\.service.*journalctl --user-unit/u,
+  )
+})

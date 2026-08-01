@@ -8,6 +8,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { deviceSelectionPath } from '../device-selection.js'
+import { isNodeError, runSystemctl } from '../node-utils.js'
 import { DEFAULT_VOICE_UNIT_NAME } from '../service/control.js'
 import {
   buildStackChanStatusAppletServiceUnit,
@@ -18,6 +19,7 @@ import {
 } from '../service/user-service.js'
 
 const DEFAULT_APPLET_UNIT_NAME = 'stackchan-codex-voice-applet.service'
+const APPLET_RUNTIME_TIMEOUT_MS = 10_000
 
 async function main(): Promise<void> {
   const parsed = parseArgs({
@@ -36,6 +38,7 @@ async function main(): Promise<void> {
     return
   }
 
+  const dryRun = parsed.values['dry-run'] ?? false
   const unitName = validateSystemdUnitName(
     parsed.values['unit-name'] ?? DEFAULT_APPLET_UNIT_NAME,
   )
@@ -47,15 +50,14 @@ async function main(): Promise<void> {
   }
   const gjsPath = parsed.values.gjs
     ? resolve(parsed.values.gjs)
-    : await findExecutable('gjs')
+    : await findExecutable('gjs', dryRun)
   const appletPath = fileURLToPath(new URL('./status-applet.js', import.meta.url))
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url))
   await Promise.all([
-    access(gjsPath, constants.X_OK),
+    ...(dryRun ? [] : [access(gjsPath, constants.X_OK)]),
     access(appletPath, constants.R_OK),
     access(cliPath, constants.R_OK),
   ])
-  await checkAppletRuntime(gjsPath, appletPath)
 
   const unit = buildStackChanStatusAppletServiceUnit({
     gjsPath,
@@ -65,10 +67,11 @@ async function main(): Promise<void> {
     voiceUnitName,
     deviceSelectionPath: deviceSelectionPath(),
   })
-  if (parsed.values['dry-run']) {
+  if (dryRun) {
     process.stdout.write(unit)
     return
   }
+  await checkAppletRuntime(gjsPath, appletPath)
 
   const configHome =
     process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.length > 0
@@ -110,7 +113,10 @@ async function assertVoiceServiceSupportsDeviceSelection(
   }
 }
 
-async function findExecutable(name: string): Promise<string> {
+async function findExecutable(
+  name: string,
+  allowMissing = false,
+): Promise<string> {
   if (isAbsolute(name)) {
     await access(name, constants.X_OK)
     return name
@@ -125,6 +131,7 @@ async function findExecutable(name: string): Promise<string> {
       // Continue through PATH.
     }
   }
+  if (allowMissing) return join('/usr/bin', name)
   throw new Error(
     'gjsが見つかりません。GJS、GTK 3、AyatanaAppIndicator3を導入してください',
   )
@@ -136,12 +143,27 @@ async function checkAppletRuntime(gjsPath: string, appletPath: string): Promise<
       stdio: ['ignore', 'ignore', 'pipe'],
     })
     let stderr = ''
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGKILL')
+      reject(
+        new Error(
+          `アプレット実行環境の確認が${APPLET_RUNTIME_TIMEOUT_MS} msでタイムアウトしました`,
+        ),
+      )
+    }, APPLET_RUNTIME_TIMEOUT_MS)
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
       stderr += chunk
     })
-    child.once('error', reject)
+    child.once('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
     child.once('exit', (code, signal) => {
+      clearTimeout(timer)
+      if (timedOut) return
       if (code === 0) {
         resolvePromise()
         return
@@ -170,30 +192,6 @@ async function assertGeneratedOrMissing(path: string): Promise<void> {
       `既存のunitはこのインストーラの生成物ではないため上書きしません: ${path}`,
     )
   }
-}
-
-async function runSystemctl(args: string[]): Promise<void> {
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn('systemctl', args, { stdio: 'inherit' })
-    child.once('error', reject)
-    child.once('exit', (code, signal) => {
-      if (code === 0) {
-        resolvePromise()
-        return
-      }
-      reject(
-        new Error(
-          `systemctl ${args.join(' ')} failed (${
-            signal ? `signal ${signal}` : `exit ${String(code)}`
-          })`,
-        ),
-      )
-    })
-  })
-}
-
-function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && 'code' in error && error.code === code
 }
 
 const HELP = `Usage: stackchan-codex-voice-install-applet [options]

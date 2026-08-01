@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { isNodeError } from './node-utils.js'
 
 export const DEVICE_SELECTION_FILE = 'selected-device'
 
@@ -55,6 +56,7 @@ export async function writeSelectedDeviceId(
   const normalized = validateDeviceId(deviceId)
   await mkdir(dirname(path), { recursive: true })
   const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`
+  let renamed = false
   try {
     await writeFile(temporaryPath, `${normalized}\n`, {
       encoding: 'utf8',
@@ -62,13 +64,12 @@ export async function writeSelectedDeviceId(
       mode: 0o600,
     })
     await rename(temporaryPath, path)
+    renamed = true
   } finally {
-    await unlink(temporaryPath).catch((error: unknown) => {
-      if (!isNodeError(error, 'ENOENT')) throw error
-    })
+    if (!renamed) {
+      await unlink(temporaryPath).catch((error: unknown) => {
+        if (!isNodeError(error, 'ENOENT')) throw error
+      })
+    }
   }
-}
-
-function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return error instanceof Error && 'code' in error && error.code === code
 }

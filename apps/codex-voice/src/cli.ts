@@ -18,7 +18,11 @@ import {
   stopUserService,
 } from './service/control.js'
 import { validateSystemdUnitName } from './service/user-service.js'
-import { collectDockStatus, formatDockStatus } from './status.js'
+import {
+  buildDockDevices,
+  collectDockStatus,
+  formatDockStatus,
+} from './status.js'
 import { discoverStackChanDevices } from './usb/device.js'
 import {
   assertReadableWorkspaceSkill,
@@ -132,12 +136,7 @@ async function main(): Promise<void> {
     ])
     const result = {
       selectedDeviceId: selectedDeviceId ?? null,
-      devices: devices.map((device) => ({
-        ...device,
-        selected:
-          device.deviceId !== undefined && device.deviceId === selectedDeviceId,
-        selectable: device.deviceId !== undefined,
-      })),
+      devices: buildDockDevices(devices, selectedDeviceId),
     }
     if (command.json) {
       console.log(JSON.stringify(result))

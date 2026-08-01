@@ -57,12 +57,16 @@ export async function selectDockDevice(
 
   const service = await dependencies.queryServiceStatus(options.unitName)
   await dependencies.writeSelection(deviceId, options.deviceSelectionPath)
+  let serviceRestarted = false
   if (service.installed) {
     await dependencies.restartServiceIfActive(options.unitName)
+    serviceRestarted = (
+      await dependencies.queryServiceStatus(options.unitName)
+    ).active
   }
   return {
     deviceId,
     path: matches[0]!.path,
-    serviceRestarted: service.active,
+    serviceRestarted,
   }
 }
