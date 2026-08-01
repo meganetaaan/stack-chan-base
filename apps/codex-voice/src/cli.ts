@@ -1,10 +1,25 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process'
 import { runApplication } from './application.js'
 import { CLI_HELP, parseCliCommand } from './cli-options.js'
 import { CodexAppServer } from './codex/app-server.js'
 import { connectCodexDaemon } from './codex/rpc.js'
+import {
+  readSelectedDeviceId,
+  readSelectedDeviceIdIfPresent,
+} from './device-selection.js'
+import { selectDockDevice } from './device-manager.js'
+import { NonRetryableError } from './retry-policy.js'
+import {
+  DEFAULT_VOICE_UNIT_NAME,
+  queryUserServiceStatus,
+  restartUserService,
+  startUserService,
+  stopUserService,
+} from './service/control.js'
+import { validateSystemdUnitName } from './service/user-service.js'
+import { collectDockStatus, formatDockStatus } from './status.js'
+import { discoverStackChanDevices } from './usb/device.js'
 import {
   assertReadableWorkspaceSkill,
   initializeWorkspace,
@@ -17,7 +32,6 @@ import {
 } from './workspace.js'
 
 const VERSION = '0.1.0'
-const DEFAULT_UNIT_NAME = 'stackchan-codex-voice.service'
 
 async function main(): Promise<void> {
   const command = parseCliCommand(process.argv.slice(2))
@@ -63,9 +77,9 @@ async function main(): Promise<void> {
   if (command.kind === 'workspace-use') {
     const workspace = await setActiveWorkspace(command.workspacePath)
     console.log(`アクティブworkspaceを変更しました: ${workspace.root}`)
-    if (await isUserServiceActive(DEFAULT_UNIT_NAME)) {
-      await restartUserService(DEFAULT_UNIT_NAME)
-      console.log(`稼働中serviceへ反映しました: ${DEFAULT_UNIT_NAME}`)
+    if ((await queryUserServiceStatus(DEFAULT_VOICE_UNIT_NAME)).active) {
+      await restartUserService(DEFAULT_VOICE_UNIT_NAME)
+      console.log(`稼働中serviceへ反映しました: ${DEFAULT_VOICE_UNIT_NAME}`)
     } else {
       console.log('serviceは稼働していないため、workspaceの選択だけを保存しました')
     }
@@ -73,7 +87,7 @@ async function main(): Promise<void> {
   }
   if (command.kind === 'workspace-apply') {
     const workspace = await loadActiveWorkspace()
-    await restartUserService(DEFAULT_UNIT_NAME)
+    await restartUserService(DEFAULT_VOICE_UNIT_NAME)
     console.log(`workspaceをserviceへ反映しました: ${workspace.root}`)
     return
   }
@@ -90,7 +104,88 @@ async function main(): Promise<void> {
     }
     return
   }
+  if (command.kind === 'status') {
+    const status = await collectDockStatus(
+      validateSystemdUnitName(command.unitName ?? DEFAULT_VOICE_UNIT_NAME),
+      command.deviceSelectionPath,
+    )
+    console.log(command.json ? JSON.stringify(status) : formatDockStatus(status))
+    return
+  }
+  if (command.kind === 'service-start' || command.kind === 'service-stop') {
+    const unitName = validateSystemdUnitName(
+      command.unitName ?? DEFAULT_VOICE_UNIT_NAME,
+    )
+    if (command.kind === 'service-start') {
+      await startUserService(unitName)
+      console.log(`Codex voice serviceをONにしました: ${unitName}`)
+    } else {
+      await stopUserService(unitName)
+      console.log(`Codex voice serviceをOFFにしました: ${unitName}`)
+    }
+    return
+  }
+  if (command.kind === 'device-list') {
+    const [selectedDeviceId, devices] = await Promise.all([
+      readSelectedDeviceIdIfPresent(command.deviceSelectionPath),
+      discoverStackChanDevices(),
+    ])
+    const result = {
+      selectedDeviceId: selectedDeviceId ?? null,
+      devices: devices.map((device) => ({
+        ...device,
+        selected:
+          device.deviceId !== undefined && device.deviceId === selectedDeviceId,
+        selectable: device.deviceId !== undefined,
+      })),
+    }
+    if (command.json) {
+      console.log(JSON.stringify(result))
+    } else if (result.devices.length === 0) {
+      console.log('接続中のCoreS3はありません')
+    } else {
+      for (const device of result.devices) {
+        console.log(
+          `${device.selected ? '*' : '-'} ${device.path}  ${device.deviceId ?? '(USB serial numberなし)'}`,
+        )
+      }
+    }
+    return
+  }
+  if (command.kind === 'device-use') {
+    const result = await selectDockDevice({
+      deviceId: command.deviceId,
+      unitName: validateSystemdUnitName(
+        command.unitName ?? DEFAULT_VOICE_UNIT_NAME,
+      ),
+      ...(command.deviceSelectionPath
+        ? { deviceSelectionPath: command.deviceSelectionPath }
+        : {}),
+    })
+    if (result.serviceRestarted) {
+      console.log(`接続先を変更してserviceへ反映しました: ${result.deviceId}`)
+    } else {
+      console.log(`接続先を変更しました（serviceはOFFのままです）: ${result.deviceId}`)
+    }
+    return
+  }
   const workspace = await loadActiveWorkspace()
+  const {
+    deviceSelectionPath: selectedDevicePath,
+    ...applicationOptions
+  } = command.options
+  let selectedDeviceId: string | undefined
+  if (selectedDevicePath) {
+    try {
+      selectedDeviceId = await readSelectedDeviceId(selectedDevicePath)
+    } catch (error) {
+      throw new NonRetryableError(
+        'configuration',
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      )
+    }
+  }
   const controller = new AbortController()
   let signalCount = 0
   const shutdown = (signal: NodeJS.Signals) => {
@@ -106,7 +201,8 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown)
   await runApplication(
     {
-      ...command.options,
+      ...applicationOptions,
+      ...(selectedDeviceId ? { deviceId: selectedDeviceId } : {}),
       workspace,
     },
     controller.signal,
@@ -115,30 +211,5 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error))
-  process.exitCode = 1
+  process.exitCode = error instanceof NonRetryableError ? 78 : 1
 })
-
-async function isUserServiceActive(unitName: string): Promise<boolean> {
-  return (await systemctl(['--user', 'is-active', '--quiet', unitName], true)) === 0
-}
-
-async function restartUserService(unitName: string): Promise<void> {
-  await systemctl(['--user', 'restart', unitName])
-  await systemctl(['--user', 'is-active', '--quiet', unitName])
-}
-
-async function systemctl(args: string[], allowFailure = false): Promise<number> {
-  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolvePromise, reject) => {
-      const child = spawn('systemctl', args, { stdio: 'inherit' })
-      child.once('error', reject)
-      child.once('exit', (code, signal) => resolvePromise({ code, signal }))
-    },
-  )
-  if (result.code !== null && (result.code === 0 || allowFailure)) return result.code
-  throw new Error(
-    `systemctl ${args.join(' ')} failed (${
-      result.signal ? `signal ${result.signal}` : `exit ${String(result.code)}`
-    })`,
-  )
-}

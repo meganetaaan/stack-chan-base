@@ -49,6 +49,31 @@ test('run rejects ambiguous simultaneous port and device ID selectors', () => {
       ]),
     /mutually exclusive/,
   )
+  assert.throws(
+    () =>
+      parseCliCommand([
+        'run',
+        '--device-id',
+        'STACKCHAN-PRIMARY',
+        '--device-selection',
+        '/tmp/selected-device',
+      ]),
+    /mutually exclusive/,
+  )
+})
+
+test('run accepts a service-managed device selection file', () => {
+  assert.deepEqual(
+    parseCliCommand([
+      'run',
+      '--device-selection',
+      '/tmp/selected-device',
+    ]),
+    {
+      kind: 'run',
+      options: { deviceSelectionPath: '/tmp/selected-device' },
+    },
+  )
 })
 
 test('config commands resolve workspace paths and support voice changes', () => {
@@ -98,4 +123,51 @@ test('workspace and voice commands parse stable public shapes', () => {
     kind: 'voice-list',
     socketPath: '/tmp/codex.sock',
   })
+})
+
+test('status, service, and device management commands parse applet operations', () => {
+  assert.deepEqual(
+    parseCliCommand([
+      'status',
+      '--json',
+      '--unit-name',
+      'custom.service',
+      '--device-selection',
+      '/tmp/selected-device',
+    ]),
+    {
+      kind: 'status',
+      json: true,
+      unitName: 'custom.service',
+      deviceSelectionPath: '/tmp/selected-device',
+    },
+  )
+  assert.deepEqual(parseCliCommand(['service', 'start']), {
+    kind: 'service-start',
+  })
+  assert.deepEqual(parseCliCommand(['service', 'stop']), {
+    kind: 'service-stop',
+  })
+  assert.deepEqual(parseCliCommand(['device', 'list', '--json']), {
+    kind: 'device-list',
+    json: true,
+  })
+  assert.deepEqual(
+    parseCliCommand([
+      'device',
+      'use',
+      '--unit-name',
+      'custom.service',
+      '--device-selection',
+      '/tmp/selected-device',
+      '--',
+      'STACKCHAN-PRIMARY',
+    ]),
+    {
+      kind: 'device-use',
+      deviceId: 'STACKCHAN-PRIMARY',
+      unitName: 'custom.service',
+      deviceSelectionPath: '/tmp/selected-device',
+    },
+  )
 })

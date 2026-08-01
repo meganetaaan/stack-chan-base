@@ -777,6 +777,24 @@ export type StackChanPortInfo = {
   serialNumber: string | undefined
 }
 
+export type StackChanDeviceInfo = {
+  path: string
+  deviceId: string | undefined
+}
+
+export async function discoverStackChanDevices(): Promise<StackChanDeviceInfo[]> {
+  return selectStackChanDevices(await SerialPort.list())
+}
+
+export function selectStackChanDevices(
+  ports: StackChanPortInfo[],
+): StackChanDeviceInfo[] {
+  return ports
+    .filter(isCompatibleStackChanPort)
+    .map((port) => ({ path: port.path, deviceId: port.serialNumber }))
+    .sort((left, right) => left.path.localeCompare(right.path))
+}
+
 export async function discoverStackChanPort(deviceId?: string): Promise<string> {
   return selectStackChanPort(await SerialPort.list(), deviceId)
 }
@@ -789,11 +807,7 @@ export function selectStackChanPort(
   ports: StackChanPortInfo[],
   deviceId?: string,
 ): string {
-  const compatible = ports.filter(
-    (port) =>
-      port.vendorId?.toLowerCase() === CORES3_USB_VENDOR_ID &&
-      port.productId?.toLowerCase() === CORES3_USB_PRODUCT_ID,
-  )
+  const compatible = ports.filter(isCompatibleStackChanPort)
   const matches =
     deviceId === undefined
       ? compatible
@@ -840,6 +854,13 @@ export function selectStackChanDeviceId(
     )
   }
   return port.serialNumber
+}
+
+function isCompatibleStackChanPort(port: StackChanPortInfo): boolean {
+  return (
+    port.vendorId?.toLowerCase() === CORES3_USB_VENDOR_ID &&
+    port.productId?.toLowerCase() === CORES3_USB_PRODUCT_ID
+  )
 }
 
 function openPort(port: SerialPortLike, signal: AbortSignal): Promise<void> {

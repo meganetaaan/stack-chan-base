@@ -7,6 +7,10 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+import {
+  deviceSelectionPath,
+  writeSelectedDeviceId,
+} from '../device-selection.js'
 import { discoverStackChanDeviceId } from '../usb/device.js'
 import {
   buildStackChanUserServiceUnit,
@@ -41,12 +45,13 @@ async function main(): Promise<void> {
     parsed.values['unit-name'] ?? DEFAULT_UNIT_NAME,
   )
   const deviceId = await discoverStackChanDeviceId(portPath)
+  const selectionPath = deviceSelectionPath()
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url))
   await access(cliPath, constants.R_OK)
   const unit = buildStackChanUserServiceUnit({
     nodePath: process.execPath,
     cliPath,
-    deviceId,
+    deviceSelectionPath: selectionPath,
     ...(parsed.values.socket
       ? { socketPath: parsed.values.socket }
       : {}),
@@ -63,6 +68,7 @@ async function main(): Promise<void> {
       : join(homedir(), '.config')
   const unitPath = join(configHome, 'systemd', 'user', unitName)
   await assertGeneratedOrMissing(unitPath)
+  await writeSelectedDeviceId(deviceId, selectionPath)
   await mkdir(dirname(unitPath), { recursive: true })
   const temporaryPath = `${unitPath}.tmp-${process.pid}`
   await writeFile(temporaryPath, unit, { encoding: 'utf8', mode: 0o644 })
@@ -117,8 +123,8 @@ async function runSystemctl(args: string[]): Promise<void> {
 const HELP = `Usage: stackchan-codex-voice-install-service [options]
 
 /dev/ttyACM0のUSB serial numberを取得し、Codex音声ブリッジを
-systemd --userサービスとして導入します。unitは--device-idを使うため、
-別のCoreS3へ自動接続しません。
+systemd --userサービスとして導入します。unitは選択ファイルのdevice IDを
+起動時に読むため、別のCoreS3へ自動接続せず、アプレットから変更できます。
 
 Options:
   --port <path>      ID取得元（既定: /dev/ttyACM0）

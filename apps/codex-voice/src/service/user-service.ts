@@ -2,8 +2,18 @@ export type StackChanUserServiceOptions = {
   description?: string
   nodePath: string
   cliPath: string
-  deviceId: string
+  deviceSelectionPath: string
   socketPath?: string
+}
+
+export type StackChanStatusAppletServiceOptions = {
+  description?: string
+  gjsPath: string
+  appletPath: string
+  nodePath: string
+  cliPath: string
+  voiceUnitName: string
+  deviceSelectionPath: string
 }
 
 export const GENERATED_UNIT_MARKER =
@@ -18,8 +28,8 @@ export function buildStackChanUserServiceUnit(
     options.nodePath,
     options.cliPath,
     'run',
-    '--device-id',
-    options.deviceId,
+    '--device-selection',
+    options.deviceSelectionPath,
     ...(options.socketPath ? ['--socket', options.socketPath] : []),
   ]
   return `${GENERATED_UNIT_MARKER}
@@ -30,6 +40,7 @@ Description=${options.description ?? 'Stack-chan Codex voice bridge'}
 Type=simple
 ExecStart=${args.map(systemdQuote).join(' ')}
 Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=2
 TimeoutStopSec=15
 
@@ -38,13 +49,58 @@ WantedBy=default.target
 `
 }
 
+export function buildStackChanStatusAppletServiceUnit(
+  options: StackChanStatusAppletServiceOptions,
+): string {
+  const args = [
+    options.gjsPath,
+    options.appletPath,
+    '--node',
+    options.nodePath,
+    '--cli',
+    options.cliPath,
+    '--unit-name',
+    validateSystemdUnitName(options.voiceUnitName),
+    '--device-selection',
+    options.deviceSelectionPath,
+  ]
+  return `${GENERATED_UNIT_MARKER}
+[Unit]
+Description=${options.description ?? 'Stack-chan Codex voice status applet'}
+
+[Service]
+Type=simple
+ExecStart=${args.map(systemdQuote).join(' ')}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+`
+}
+
+export function stackChanUserServiceUsesDeviceSelection(
+  unit: string,
+  deviceSelectionPath: string,
+): boolean {
+  return (
+    unit.startsWith(GENERATED_UNIT_MARKER) &&
+    unit.includes(
+      `"--device-selection" ${systemdQuote(deviceSelectionPath)}`,
+    )
+  )
+}
+
 export async function enableAndStartUserService(
   unitName: string,
   runSystemctl: SystemctlRunner,
 ): Promise<void> {
   validateSystemdUnitName(unitName)
   await runSystemctl(['--user', 'daemon-reload'])
-  await runSystemctl(['--user', 'enable', '--now', unitName])
+  await runSystemctl(['--user', 'enable', unitName])
+  // `enable --now` leaves an already-running process on its previous
+  // ExecStart. Restart explicitly so a reinstalled unit always takes effect.
+  await runSystemctl(['--user', 'restart', unitName])
   await runSystemctl(['--user', 'is-active', '--quiet', unitName])
 }
 
