@@ -20,6 +20,33 @@ test('shared command runner captures output and returns a nonzero exit', async (
   })
 })
 
+test('shared command runner waits for descendant output to close', async () => {
+  const grandchildScript = [
+    'setTimeout(() => {',
+    '  process.stdout.write("late stdout\\n");',
+    '  process.stderr.write("late stderr\\n");',
+    '}, 50)',
+  ].join('\n')
+  const directChildScript = [
+    'const { spawn } = require("node:child_process")',
+    `spawn(process.execPath, ["-e", ${JSON.stringify(grandchildScript)}], {`,
+    '  stdio: ["ignore", "inherit", "inherit"],',
+    '})',
+    'process.stdout.write("direct stdout\\n")',
+    'process.stderr.write("direct stderr\\n")',
+    'process.exit(0)',
+  ].join('\n')
+
+  const result = await runCommand(
+    process.execPath,
+    ['-e', directChildScript],
+    { output: 'capture', timeoutMs: 2_000 },
+  )
+
+  assert.equal(result.stdout, 'direct stdout\nlate stdout\n')
+  assert.equal(result.stderr, 'direct stderr\nlate stderr\n')
+})
+
 test('shared command runner kills and rejects a timed-out child', async () => {
   await assert.rejects(
     runCommand(

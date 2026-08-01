@@ -51,7 +51,7 @@ export async function runCommand(
       clearTimeout(timer)
       reject(error)
     })
-    child.once('exit', (exitCode, signal) => {
+    child.once('close', (exitCode, signal) => {
       clearTimeout(timer)
       if (timedOut) {
         reject(
