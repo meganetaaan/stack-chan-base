@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -8,7 +7,13 @@ import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { deviceSelectionPath } from '../device-selection.js'
-import { isNodeError, runSystemctl } from '../node-utils.js'
+import {
+  formatCommandTermination,
+  isNodeError,
+  runCommand,
+  runSystemctl,
+  SYSTEMCTL_TIMEOUT_MS,
+} from '../node-utils.js'
 import { DEFAULT_VOICE_UNIT_NAME } from '../service/control.js'
 import {
   buildStackChanStatusAppletServiceUnit,
@@ -19,7 +24,6 @@ import {
 } from '../service/user-service.js'
 
 const DEFAULT_APPLET_UNIT_NAME = 'stackchan-codex-voice-applet.service'
-const APPLET_RUNTIME_TIMEOUT_MS = 10_000
 
 async function main(): Promise<void> {
   const parsed = parseArgs({
@@ -138,45 +142,16 @@ async function findExecutable(
 }
 
 async function checkAppletRuntime(gjsPath: string, appletPath: string): Promise<void> {
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn(gjsPath, [appletPath, '--check'], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    })
-    let stderr = ''
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill('SIGKILL')
-      reject(
-        new Error(
-          `アプレット実行環境の確認が${APPLET_RUNTIME_TIMEOUT_MS} msでタイムアウトしました`,
-        ),
-      )
-    }, APPLET_RUNTIME_TIMEOUT_MS)
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (chunk: string) => {
-      stderr += chunk
-    })
-    child.once('error', (error) => {
-      clearTimeout(timer)
-      reject(error)
-    })
-    child.once('exit', (code, signal) => {
-      clearTimeout(timer)
-      if (timedOut) return
-      if (code === 0) {
-        resolvePromise()
-        return
-      }
-      reject(
-        new Error(
-          `アプレット実行環境を利用できません（${
-            signal ? `signal ${signal}` : `exit ${String(code)}`
-          }）: ${stderr.trim()}`,
-        ),
-      )
-    })
+  const result = await runCommand(gjsPath, [appletPath, '--check'], {
+    output: 'capture',
+    timeoutMs: SYSTEMCTL_TIMEOUT_MS,
+    timeoutMessage:
+      `アプレット実行環境の確認が${SYSTEMCTL_TIMEOUT_MS} msでタイムアウトしました`,
   })
+  if (result.exitCode === 0) return
+  throw new Error(
+    `アプレット実行環境を利用できません（${formatCommandTermination(result)}）: ${result.stderr.trim()}`,
+  )
 }
 
 async function assertGeneratedOrMissing(path: string): Promise<void> {

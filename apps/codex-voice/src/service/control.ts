@@ -1,8 +1,10 @@
-import { spawn } from 'node:child_process'
+import {
+  runCommand,
+  SYSTEMCTL_TIMEOUT_MS,
+} from '../node-utils.js'
 import { validateSystemdUnitName } from './user-service.js'
 
 export const DEFAULT_VOICE_UNIT_NAME = 'stackchan-codex-voice.service'
-const SYSTEMCTL_TIMEOUT_MS = 10_000
 
 export type UserServiceStatus = {
   unitName: string
@@ -101,9 +103,19 @@ export async function tryRestartUserService(
 }
 
 export async function runSystemctlCommand(args: string[]): Promise<void> {
-  const result = await spawnSystemctl(args, 'inherit')
+  const result = await runCommand('systemctl', args, {
+    output: 'inherit',
+    timeoutMs: SYSTEMCTL_TIMEOUT_MS,
+  })
+  if (result.exitCode === null) {
+    throw new Error(
+      `systemctl ${args.join(' ')} stopped by ${String(result.signal)}`,
+    )
+  }
   if (result.exitCode !== 0) {
-    throw new Error(`systemctl ${args.join(' ')} failed (exit ${result.exitCode})`)
+    throw new Error(
+      `systemctl ${args.join(' ')} failed (exit ${result.exitCode})`,
+    )
   }
 }
 
@@ -124,53 +136,18 @@ async function assertUserServiceActive(
 async function runSystemctlQuery(
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return spawnSystemctl(args, 'capture')
-}
-
-async function spawnSystemctl(
-  args: string[],
-  output: 'inherit' | 'capture',
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('systemctl', args, {
-      stdio: output === 'inherit' ? 'inherit' : ['ignore', 'pipe', 'pipe'],
-    })
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill('SIGKILL')
-    }, SYSTEMCTL_TIMEOUT_MS)
-    let stdout = ''
-    let stderr = ''
-    if (output === 'capture') {
-      child.stdout?.setEncoding('utf8')
-      child.stderr?.setEncoding('utf8')
-      child.stdout?.on('data', (chunk: string) => {
-        stdout += chunk
-      })
-      child.stderr?.on('data', (chunk: string) => {
-        stderr += chunk
-      })
-    }
-    child.once('error', (error) => {
-      clearTimeout(timer)
-      reject(error)
-    })
-    child.once('exit', (code, signal) => {
-      clearTimeout(timer)
-      if (timedOut) {
-        reject(
-          new Error(
-            `systemctl ${args.join(' ')} timed out after ${SYSTEMCTL_TIMEOUT_MS} ms`,
-          ),
-        )
-        return
-      }
-      if (code === null) {
-        reject(new Error(`systemctl ${args.join(' ')} stopped by ${String(signal)}`))
-        return
-      }
-      resolve({ exitCode: code, stdout, stderr })
-    })
+  const result = await runCommand('systemctl', args, {
+    output: 'capture',
+    timeoutMs: SYSTEMCTL_TIMEOUT_MS,
   })
+  if (result.exitCode === null) {
+    throw new Error(
+      `systemctl ${args.join(' ')} stopped by ${String(result.signal)}`,
+    )
+  }
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  }
 }
