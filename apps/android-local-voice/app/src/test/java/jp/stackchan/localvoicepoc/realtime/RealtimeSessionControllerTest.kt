@@ -472,6 +472,93 @@ class RealtimeSessionControllerTest {
     }
 
     @Test
+    fun retainsAnMcpCatalogForInstructionsOnlyUpdatesAndClosesItWhenToolsAreRemoved() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = TrackingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val catalog = mcp.catalogs.single()
+
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-b","session":{"instructions":"updated"}}""",
+        )
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        assertEquals(1, mcp.catalogs.size)
+        assertEquals(0, catalog.closeCalls)
+        assertEquals("catalog-0", requireNotNull(registry.mcpExecutor).execute(DeviceToolCall("mcp__test__write")))
+
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-c","session":{"tools":[]}}""",
+        )
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-c"
+            }
+        }
+        assertEquals(1, catalog.closeCalls)
+        assertTrue(registry.definitions.none { it is ToolDefinition.Mcp })
+        controller.close()
+    }
+
+    @Test
+    fun rollsBackAPreparedMcpCatalogWhenTheProviderCommitFails() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = TrackingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val committedCatalog = mcp.catalogs.single()
+        val committedExecutor = requireNotNull(registry.mcpExecutor)
+        registry.failNextInstall = true
+
+        transport.receive(mcpToolUpdate("provider-b"))
+        await {
+            transport.payloads().any {
+                it.type() == "error" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+
+        assertEquals(2, mcp.catalogs.size)
+        assertEquals(0, committedCatalog.closeCalls)
+        assertEquals(1, mcp.catalogs[1].closeCalls)
+        assertTrue(committedExecutor === registry.mcpExecutor)
+        assertEquals("catalog-0", committedExecutor.execute(DeviceToolCall("mcp__test__write")))
+        controller.close()
+        assertEquals(1, committedCatalog.closeCalls)
+    }
+
+    @Test
     fun ignoresInboundEventsWhenThePeerDidNotNegotiateEvent() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.REQUIRED)
         val commands = FakeConversationCommands()
@@ -575,12 +662,17 @@ class RealtimeSessionControllerTest {
         @Volatile var functionExecutor: ToolExecutor? = null
         @Volatile var mcpExecutor: ToolExecutor? = null
         @Volatile var clearCalls = 0
+        @Volatile var failNextInstall = false
 
         override fun installRemoteTools(
             tools: List<ToolDefinition>,
             functionExecutor: ToolExecutor,
             mcpToolExecutor: ToolExecutor,
         ) {
+            if (failNextInstall) {
+                failNextInstall = false
+                error("simulated registry commit failure")
+            }
             installedDefinitions = tools
             this.functionExecutor = functionExecutor
             this.mcpExecutor = mcpToolExecutor
@@ -595,8 +687,10 @@ class RealtimeSessionControllerTest {
     }
 
     private class FakeMcp : McpToolProvider {
-        override suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp> = emptyList()
-        override suspend fun execute(call: DeviceToolCall): String = ""
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog = object : McpToolCatalog {
+            override val definitions: List<ToolDefinition.Mcp> = emptyList()
+            override suspend fun execute(call: DeviceToolCall): String = ""
+        }
     }
 
     private class BlockingMcp : McpToolProvider {
@@ -604,21 +698,59 @@ class RealtimeSessionControllerTest {
         val releaseExecution = CompletableDeferred<Unit>()
         var sideEffects = 0
 
-        override suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp> = listOf(
-            ToolDefinition.Mcp(
-                serverLabel = request.serverLabel,
-                toolName = "write",
-                name = "mcp__test__write",
-                description = "",
-                parameters = JsonObject(emptyMap()),
-            ),
-        )
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog = object : McpToolCatalog {
+            override val definitions = listOf(
+                ToolDefinition.Mcp(
+                    serverLabel = request.serverLabel,
+                    toolName = "write",
+                    name = "mcp__test__write",
+                    description = "",
+                    parameters = JsonObject(emptyMap()),
+                ),
+            )
 
-        override suspend fun execute(call: DeviceToolCall): String {
-            executionStarted.complete(Unit)
-            releaseExecution.await()
-            sideEffects += 1
-            return "executed"
+            override suspend fun execute(call: DeviceToolCall): String {
+                executionStarted.complete(Unit)
+                releaseExecution.await()
+                sideEffects += 1
+                return "executed"
+            }
+        }
+    }
+
+    private class TrackingMcp : McpToolProvider {
+        val catalogs = mutableListOf<TrackingCatalog>()
+
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog =
+            TrackingCatalog(request, catalogs.size).also(catalogs::add)
+
+        inner class TrackingCatalog(
+            request: McpServerRequest,
+            private val index: Int,
+        ) : McpToolCatalog {
+            var closeCalls = 0
+                private set
+            private var closed = false
+            override val definitions = listOf(
+                ToolDefinition.Mcp(
+                    serverLabel = request.serverLabel,
+                    toolName = "write",
+                    name = "mcp__${request.serverLabel}__write",
+                    description = "",
+                    parameters = JsonObject(emptyMap()),
+                ),
+            )
+
+            override suspend fun execute(call: DeviceToolCall): String {
+                check(!closed) { "catalog is closed" }
+                return "catalog-$index"
+            }
+
+            override fun close() {
+                if (closed) return
+                closed = true
+                closeCalls += 1
+            }
         }
     }
 

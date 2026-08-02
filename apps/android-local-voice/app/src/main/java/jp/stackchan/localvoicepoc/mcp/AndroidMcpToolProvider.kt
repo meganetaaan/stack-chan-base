@@ -13,6 +13,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import jp.stackchan.localvoicepoc.model.DeviceToolCall
 import jp.stackchan.localvoicepoc.model.ToolDefinition
 import jp.stackchan.localvoicepoc.realtime.McpServerRequest
+import jp.stackchan.localvoicepoc.realtime.McpToolCatalog
 import jp.stackchan.localvoicepoc.realtime.McpToolProvider
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
@@ -20,7 +21,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.net.URI
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 fun interface McpApprovalHandler {
     suspend fun approve(request: McpApprovalRequest): Boolean
@@ -37,24 +38,59 @@ class AndroidMcpToolProvider(
     private val inlineServerHosts: Set<String> = emptySet(),
     private val approvalHandler: McpApprovalHandler,
 ) : McpToolProvider {
-    private data class Connection(
+    private inner class Catalog(
         val request: McpServerRequest,
         val client: Client,
         val httpClient: HttpClient,
         val forceApproval: Boolean,
-    )
-    private data class Route(val connection: Connection, val toolName: String)
+        override val definitions: List<ToolDefinition.Mcp>,
+        private val routes: Map<String, String>,
+    ) : McpToolCatalog {
+        private val closed = AtomicBoolean(false)
 
-    private val connections = ConcurrentHashMap<String, Connection>()
-    private val routes = ConcurrentHashMap<String, Route>()
+        override suspend fun execute(call: DeviceToolCall): String {
+            check(!closed.get()) { "MCPカタログは終了済みです: ${request.serverLabel}" }
+            val toolName = routes[call.name] ?: error("MCPツールが見つかりません: ${call.name}")
+            if (forceApproval || request.requireApproval) {
+                val approved = approvalHandler.approve(
+                    McpApprovalRequest(request.serverLabel, toolName, call.arguments),
+                )
+                if (!approved) {
+                    lifecycleSink("response.mcp_call.failed", request.serverLabel, "ユーザーが拒否しました")
+                    return "{\"error\":\"ユーザーがMCPツールの実行を拒否しました\"}"
+                }
+            }
+            lifecycleSink("response.mcp_call.in_progress", request.serverLabel, null)
+            return runCatching {
+                val result = client.callTool(toolName, call.arguments)
+                result.structuredContent?.toString() ?: result.content.joinToString("\n") { content ->
+                    (content as? TextContent)?.text ?: content.toString()
+                }
+            }.onSuccess {
+                lifecycleSink("response.mcp_call.completed", request.serverLabel, null)
+            }.onFailure {
+                lifecycleSink("response.mcp_call.failed", request.serverLabel, it.message)
+            }.getOrThrow()
+        }
+
+        override fun close() {
+            if (!closed.compareAndSet(false, true)) return
+            synchronized(catalogLock) { catalogs.remove(this) }
+            httpClient.close()
+        }
+    }
+
+    private val catalogLock = Any()
+    private val catalogs = linkedSetOf<Catalog>()
+    private var catalogEpoch = 0L
     private var lifecycleSink: suspend (String, String, String?) -> Unit = { _, _, _ -> }
 
     override fun setLifecycleSink(sink: suspend (type: String, serverLabel: String, error: String?) -> Unit) {
         lifecycleSink = sink
     }
 
-    override suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp> {
-        closeConnection(request.serverLabel)
+    override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog {
+        val openingEpoch = synchronized(catalogLock) { catalogEpoch }
         val resolved = request.connectorId?.let(profiles::resolve)
         val url = resolved?.profile?.serverUrl ?: requireNotNull(request.serverUrl).also {
             val uri = URI(it)
@@ -76,19 +112,16 @@ class AndroidMcpToolProvider(
         val transport = StreamableHttpClientTransport(client = http, url = url) {
             token?.let { header("Authorization", "Bearer $it") }
         }
-        var registeredConnection: Connection? = null
         try {
             client.connect(transport)
-            val connection = Connection(request, client, http, resolved?.profile?.forceApproval == true)
-            registeredConnection = connection
-            connections[request.serverLabel] = connection
-            return client.listTools(ListToolsRequest()).tools
+            val routes = linkedMapOf<String, String>()
+            val definitions = client.listTools(ListToolsRequest()).tools
                 .filter { request.allowedTools == null || it.name in request.allowedTools }
                 .map { tool ->
                     val alias = alias(request.serverLabel, tool.name)
                     val properties = tool.inputSchema.properties ?: JsonObject(emptyMap())
                     val required = tool.inputSchema.required.orEmpty()
-                    routes[alias] = Route(connection, tool.name)
+                    routes[alias] = tool.name
                     ToolDefinition.Mcp(
                         serverLabel = request.serverLabel,
                         toolName = tool.name,
@@ -103,47 +136,36 @@ class AndroidMcpToolProvider(
                         },
                     )
                 }
-        } catch (error: Throwable) {
-            registeredConnection?.let { connection ->
-                connections.remove(request.serverLabel, connection)
+            val catalog = Catalog(
+                request = request,
+                client = client,
+                httpClient = http,
+                forceApproval = resolved?.profile?.forceApproval == true,
+                definitions = definitions,
+                routes = routes,
+            )
+            val accepted = synchronized(catalogLock) {
+                if (catalogEpoch == openingEpoch) {
+                    catalogs += catalog
+                    true
+                } else {
+                    false
+                }
             }
+            check(accepted) { "MCPセッションはツール取得中に終了しました" }
+            return catalog
+        } catch (error: Throwable) {
             http.close()
             throw error
         }
     }
 
-    override suspend fun execute(call: DeviceToolCall): String {
-        val route = routes[call.name] ?: error("MCPツールが見つかりません: ${call.name}")
-        if (route.connection.forceApproval || route.connection.request.requireApproval) {
-            val approved = approvalHandler.approve(
-                McpApprovalRequest(route.connection.request.serverLabel, route.toolName, call.arguments),
-            )
-            if (!approved) {
-                lifecycleSink("response.mcp_call.failed", route.connection.request.serverLabel, "ユーザーが拒否しました")
-                return "{\"error\":\"ユーザーがMCPツールの実行を拒否しました\"}"
-            }
-        }
-        lifecycleSink("response.mcp_call.in_progress", route.connection.request.serverLabel, null)
-        return runCatching {
-            val result = route.connection.client.callTool(route.toolName, call.arguments)
-            result.structuredContent?.toString() ?: result.content.joinToString("\n") { content ->
-                (content as? TextContent)?.text ?: content.toString()
-            }
-        }.onSuccess {
-            lifecycleSink("response.mcp_call.completed", route.connection.request.serverLabel, null)
-        }.onFailure {
-            lifecycleSink("response.mcp_call.failed", route.connection.request.serverLabel, it.message)
-        }.getOrThrow()
-    }
-
     override fun close() {
-        connections.keys.toList().forEach(::closeConnection)
-        routes.clear()
-    }
-
-    private fun closeConnection(label: String) {
-        connections.remove(label)?.httpClient?.close()
-        routes.entries.removeIf { it.value.connection.request.serverLabel == label }
+        val active = synchronized(catalogLock) {
+            catalogEpoch += 1
+            catalogs.toList().also { catalogs.clear() }
+        }
+        active.forEach(Catalog::close)
     }
 
     private fun alias(label: String, name: String): String =

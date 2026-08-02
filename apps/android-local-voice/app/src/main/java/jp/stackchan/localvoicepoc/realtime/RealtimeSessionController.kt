@@ -48,9 +48,14 @@ data class McpServerRequest(
     val requireApproval: Boolean,
 )
 
-interface McpToolProvider {
-    suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp>
+interface McpToolCatalog : AutoCloseable {
+    val definitions: List<ToolDefinition.Mcp>
     suspend fun execute(call: DeviceToolCall): String
+    override fun close() = Unit
+}
+
+interface McpToolProvider {
+    suspend fun openCatalog(request: McpServerRequest): McpToolCatalog
     fun setLifecycleSink(sink: suspend (type: String, serverLabel: String, error: String?) -> Unit) = Unit
     fun close() = Unit
 }
@@ -72,6 +77,7 @@ class RealtimeSessionController(
     private class ProviderGenerationLease(
         val id: String,
         val session: JsonObject,
+        val mcpBinding: McpGenerationBinding,
     ) {
         val operations = linkedSetOf<Job>()
         lateinit var announcement: JsonObject
@@ -79,6 +85,38 @@ class RealtimeSessionController(
     }
 
     private class ProviderGenerationRetiredCancellation(reason: String) : CancellationException(reason)
+
+    private class McpGenerationBinding(
+        private val catalogs: List<McpToolCatalog>,
+    ) : AutoCloseable {
+        private val routes = buildMap {
+            catalogs.forEach { catalog ->
+                catalog.definitions.forEach { definition ->
+                    require(put(definition.name, catalog) == null) {
+                        "MCPツール名が重複しています: ${definition.name}"
+                    }
+                }
+            }
+        }
+
+        val definitions: List<ToolDefinition.Mcp> = catalogs.flatMap(McpToolCatalog::definitions)
+
+        suspend fun execute(call: DeviceToolCall): String =
+            requireNotNull(routes[call.name]) { "MCPツールが見つかりません: ${call.name}" }.execute(call)
+
+        override fun close() {
+            catalogs.forEach { catalog -> runCatching { catalog.close() } }
+        }
+
+        companion object {
+            fun empty() = McpGenerationBinding(emptyList())
+        }
+    }
+
+    private data class ParsedTools(
+        val definitions: List<ToolDefinition>,
+        val mcpBinding: McpGenerationBinding,
+    )
 
     private data class PendingFunction(
         val providerGeneration: ProviderGenerationLease,
@@ -89,6 +127,7 @@ class RealtimeSessionController(
         val functions: List<CompletableDeferred<String>>,
         val operations: List<Job>,
         val announcementJob: Job?,
+        val mcpBinding: McpGenerationBinding?,
     )
 
     private val encoder = StackChanEventEncoder()
@@ -100,6 +139,7 @@ class RealtimeSessionController(
     private val providerUpdateHistory = mutableMapOf<String, JsonObject>()
     private val conversationResults = LinkedHashMap<String, CachedConversationResult>()
     private var remoteFunctionsAvailable = false
+    private var transportSessionEpoch = 0L
     private var providerGeneration: ProviderGenerationLease? = null
     private var controllerClosed = false
     private var instructionOverlay = ""
@@ -237,9 +277,16 @@ class RealtimeSessionController(
     }
 
     private suspend fun applySessionUpdate(root: JsonObject, eventId: String?) {
+        var preparedMcpBinding: McpGenerationBinding? = null
         try {
             val nextProviderGeneration = requireNotNull(eventId) { "session.updateにはevent_idが必要です" }
             val session = root["session"]?.jsonObject ?: error("sessionがありません")
+            val expectedTransportSession = synchronized(pendingFunctionsLock) {
+                check(remoteFunctionsAvailable && !controllerClosed) {
+                    "Realtimeセッションは利用できません"
+                }
+                transportSessionEpoch
+            }
             val knownSession = synchronized(pendingFunctionsLock) {
                 providerUpdateHistory[nextProviderGeneration]
             }
@@ -257,18 +304,33 @@ class RealtimeSessionController(
                 }
                 return
             }
-            val nextInstructions = if ("instructions" in session) {
+            val replacesInstructions = "instructions" in session
+            val requestedInstructions = if (replacesInstructions) {
                 session["instructions"]?.jsonPrimitive?.contentOrNull ?: ""
             } else {
-                instructionOverlay
+                null
             }
-            val nextTools = if ("tools" in session) parseTools(session["tools"]!!.jsonArray) else remoteDefinitions
-            val nextLease = ProviderGenerationLease(nextProviderGeneration, session)
+            val replacesTools = "tools" in session
+            val parsedTools = if (replacesTools) parseTools(session["tools"]!!.jsonArray) else null
+            preparedMcpBinding = parsedTools?.mcpBinding
+            lateinit var nextLease: ProviderGenerationLease
             providerTransitionMutex.withLock {
                 val retired = synchronized(pendingFunctionsLock) {
-                    check(remoteFunctionsAvailable && !controllerClosed) {
+                    check(
+                        remoteFunctionsAvailable &&
+                            !controllerClosed &&
+                            transportSessionEpoch == expectedTransportSession,
+                    ) {
                         "Realtimeセッションは利用できません"
                     }
+                    val nextInstructions = requestedInstructions ?: instructionOverlay
+                    val nextTools = parsedTools?.definitions ?: remoteDefinitions
+                    nextLease = ProviderGenerationLease(
+                        id = nextProviderGeneration,
+                        session = session,
+                        mcpBinding = parsedTools?.mcpBinding ?: providerGeneration?.mcpBinding
+                            ?: McpGenerationBinding.empty(),
+                    )
                     registry.installRemoteTools(
                         nextTools,
                         ToolExecutor { call -> executeRemoteFunction(call, nextLease) },
@@ -282,61 +344,73 @@ class RealtimeSessionController(
                         instructions = nextInstructions,
                         definitions = registry.definitions,
                     )
-                    retireProviderGenerationLocked().also {
+                    retireProviderGenerationLocked(closeMcpBinding = replacesTools).also {
                         providerGeneration = nextLease
                         providerUpdateHistory[nextProviderGeneration] = session
                     }
                 }
                 cancelRetiredProviderWork(retired, "ツール設定が更新されました")
             }
+            preparedMcpBinding = null
             announceProviderGeneration(nextLease)
         } catch (cancelled: CancellationException) {
+            preparedMcpBinding?.close()
             throw cancelled
         } catch (error: Throwable) {
+            preparedMcpBinding?.close()
             sendError(eventId, "invalid_request", error.message ?: "session.updateを適用できません")
         }
     }
 
-    private suspend fun parseTools(array: JsonArray): List<ToolDefinition> {
+    private suspend fun parseTools(array: JsonArray): ParsedTools {
         val result = mutableListOf<ToolDefinition>()
-        for (element in array) {
-            val tool = element.jsonObject
-            when (tool.requiredString("type")) {
-                "function" -> result += ToolDefinition.Function(
-                    name = tool.requiredString("name"),
-                    description = tool.string("description").orEmpty(),
-                    parameters = tool["parameters"]?.jsonObject ?: emptyObjectSchema(),
-                )
-                "mcp" -> {
-                    val label = tool.requiredString("server_label")
-                    val connectorId = tool.string("connector_id")
-                    val serverUrl = tool.string("server_url")
-                    require((connectorId == null) xor (serverUrl == null)) {
-                        "MCPにはconnector_idまたはserver_urlのどちらか一方が必要です"
+        val catalogs = mutableListOf<McpToolCatalog>()
+        val serverLabels = mutableSetOf<String>()
+        try {
+            for (element in array) {
+                val tool = element.jsonObject
+                when (tool.requiredString("type")) {
+                    "function" -> result += ToolDefinition.Function(
+                        name = tool.requiredString("name"),
+                        description = tool.string("description").orEmpty(),
+                        parameters = tool["parameters"]?.jsonObject ?: emptyObjectSchema(),
+                    )
+                    "mcp" -> {
+                        val label = tool.requiredString("server_label")
+                        require(serverLabels.add(label)) { "MCP server_labelが重複しています: $label" }
+                        val connectorId = tool.string("connector_id")
+                        val serverUrl = tool.string("server_url")
+                        require((connectorId == null) xor (serverUrl == null)) {
+                            "MCPにはconnector_idまたはserver_urlのどちらか一方が必要です"
+                        }
+                        require(tool["authorization"] == null && tool["headers"] == null) {
+                            "認証情報はAndroidのMCPプロファイルに保存してください"
+                        }
+                        val allowed = tool["allowed_tools"]?.jsonArray
+                            ?.mapTo(linkedSetOf()) { it.jsonPrimitive.content }
+                        val approval = when (tool.string("require_approval") ?: "always") {
+                            "always" -> true
+                            "never" -> false
+                            else -> error("require_approvalはalwaysまたはneverを指定してください")
+                        }
+                        sendMcpLifecycle("mcp_list_tools.in_progress", label)
+                        val catalog = runCatching {
+                            mcp.openCatalog(McpServerRequest(label, connectorId, serverUrl, allowed, approval))
+                        }.onFailure {
+                            sendMcpLifecycle("mcp_list_tools.failed", label, it.message)
+                        }.getOrThrow()
+                        catalogs += catalog
+                        result += catalog.definitions
+                        sendMcpLifecycle("mcp_list_tools.completed", label)
                     }
-                    require(tool["authorization"] == null && tool["headers"] == null) {
-                        "認証情報はAndroidのMCPプロファイルに保存してください"
-                    }
-                    val allowed = tool["allowed_tools"]?.jsonArray
-                        ?.mapTo(linkedSetOf()) { it.jsonPrimitive.content }
-                    val approval = when (tool.string("require_approval") ?: "always") {
-                        "always" -> true
-                        "never" -> false
-                        else -> error("require_approvalはalwaysまたはneverを指定してください")
-                    }
-                    sendMcpLifecycle("mcp_list_tools.in_progress", label)
-                    val listed = runCatching {
-                        mcp.listTools(McpServerRequest(label, connectorId, serverUrl, allowed, approval))
-                    }.onFailure {
-                        sendMcpLifecycle("mcp_list_tools.failed", label, it.message)
-                    }.getOrThrow()
-                    result += listed
-                    sendMcpLifecycle("mcp_list_tools.completed", label)
+                    else -> error("未対応のtool typeです")
                 }
-                else -> error("未対応のtool typeです")
             }
+            return ParsedTools(result, McpGenerationBinding(catalogs))
+        } catch (error: Throwable) {
+            catalogs.forEach { catalog -> runCatching { catalog.close() } }
+            throw error
         }
-        return result
     }
 
     private suspend fun executeRemoteFunction(
@@ -402,7 +476,9 @@ class RealtimeSessionController(
     private suspend fun executeMcp(
         call: DeviceToolCall,
         expectedProviderGeneration: ProviderGenerationLease,
-    ): String = withProviderOperation(expectedProviderGeneration) { mcp.execute(call) }
+    ): String = withProviderOperation(expectedProviderGeneration) {
+        expectedProviderGeneration.mcpBinding.execute(call)
+    }
 
     private suspend fun <Result> withProviderOperation(
         expectedProviderGeneration: ProviderGenerationLease,
@@ -576,12 +652,13 @@ class RealtimeSessionController(
         if (controllerClosed) {
             false
         } else {
+            if (!remoteFunctionsAvailable) transportSessionEpoch += 1
             remoteFunctionsAvailable = true
             true
         }
     }
 
-    private fun retireProviderGenerationLocked(): RetiredProviderWork {
+    private fun retireProviderGenerationLocked(closeMcpBinding: Boolean = true): RetiredProviderWork {
         val generation = providerGeneration
         providerGeneration = null
         val functions = pendingFunctions.values.map(PendingFunction::result).also { pendingFunctions.clear() }
@@ -589,7 +666,12 @@ class RealtimeSessionController(
         generation?.operations?.clear()
         val announcementJob = generation?.announcementJob
         if (generation != null) generation.announcementJob = null
-        return RetiredProviderWork(functions, operations, announcementJob)
+        return RetiredProviderWork(
+            functions = functions,
+            operations = operations,
+            announcementJob = announcementJob,
+            mcpBinding = generation?.mcpBinding?.takeIf { closeMcpBinding },
+        )
     }
 
     private fun cancelRetiredProviderWork(work: RetiredProviderWork, reason: String) {
@@ -598,6 +680,7 @@ class RealtimeSessionController(
         val cancellation = ProviderGenerationRetiredCancellation(reason)
         work.operations.forEach { it.cancel(cancellation) }
         work.announcementJob?.cancel(cancellation)
+        work.mcpBinding?.close()
     }
 
     private suspend fun resetSession(reason: String) {
