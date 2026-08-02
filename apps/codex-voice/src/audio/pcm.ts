@@ -19,6 +19,35 @@ export function pcmChunk(data: Uint8Array, sampleRate: number): PcmChunk {
   return { data, sampleRate, channels: 1, format: 's16le' }
 }
 
+export class StreamingPcm16ByteFramer {
+  #pendingByte: number | undefined
+
+  push(input: Uint8Array): Uint8Array {
+    let bytes: Uint8Array
+    if (this.#pendingByte === undefined) {
+      bytes = input
+    } else {
+      bytes = new Uint8Array(input.byteLength + 1)
+      bytes[0] = this.#pendingByte
+      bytes.set(input, 1)
+      this.#pendingByte = undefined
+    }
+    const completeBytes = bytes.byteLength - (bytes.byteLength % 2)
+    if (completeBytes < bytes.byteLength) this.#pendingByte = bytes[completeBytes]
+    return Uint8Array.from(bytes.subarray(0, completeBytes))
+  }
+
+  finish(): void {
+    if (this.#pendingByte !== undefined) {
+      throw new RangeError('PCM16 stream ended with an incomplete sample')
+    }
+  }
+
+  reset(): void {
+    this.#pendingByte = undefined
+  }
+}
+
 export class StreamingPcm16Resampler {
   readonly #sourceSampleRate: number
   readonly #targetSampleRate: number

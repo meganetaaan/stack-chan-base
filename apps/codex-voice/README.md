@@ -10,6 +10,7 @@ Codex SDKは使用しません。daemonのUnix socketへ標準WebSocketで接続
 - `codex-cli` 0.145.0相当のRealtime API
 - ChatGPTへログイン済みのCodex app-server
 - USB v2 contractとEVENT capabilityに対応したM5Stack CoreS3 firmware
+- かわいい声加工を使う場合は、`rubberband`フィルタを有効にしたFFmpeg
 - メニューバーアプレットを使う場合は、systemd user service、GJS、GTK 3、AyatanaAppIndicator3、StatusNotifier対応パネル
 
 WebSocket音声transportはAPIキー認証を要求しますが、このブリッジはWebRTC transportを使います。ChatGPTログインで接続でき、`OPENAI_API_KEY`は不要です。app-serverのWebRTC仕様は[Codex app-server README](https://github.com/openai/codex/blob/25af12f7e61572b0bc18ddb1008be543b91519b0/codex-rs/app-server/README.md#L898-L943)を参照してください。
@@ -60,6 +61,10 @@ node dist/src/cli.js \
   --workspace /absolute/path/to/conversation-workspace
 
 node dist/src/cli.js \
+  config set voice-effect cute \
+  --workspace /absolute/path/to/conversation-workspace
+
+node dist/src/cli.js \
   workspace use /absolute/path/to/conversation-workspace
 ```
 
@@ -67,6 +72,20 @@ workspaceには`.stackchan/session.toml`、`.stackchan/realtime-prompt.md`、
 `AGENTS.md`、`.agents/skills/stackchan/SKILL.md`を作成します。
 workspaceルートをCodex threadの作業ディレクトリとし、プロセス起動時は常に新しいthreadを開始します。
 voiceを省略するとapp-serverの既定値を使用します。
+`voice-effect`は既定で無効です。
+`cute`はCodex応答を+3半音へ変換し、話速を保ったままフォルマントを追従させます。
+マイク入力、会話開始音、会話終了音は加工しません。
+無効へ戻す場合:
+
+```bash
+node dist/src/cli.js \
+  config unset voice-effect \
+  --workspace /absolute/path/to/conversation-workspace
+```
+
+`config validate`は、`cute`が有効な場合にFFmpegと`rubberband`を実際に起動して検査します。
+加工処理が失敗しても原音へ自動切替せず、その会話をblockedにします。
+既存のschema version 1設定は加工無効として読み込め、設定を保存した時にversion 2へ移行します。
 
 利用可能なvoiceはUSB接続なしで確認できます。
 
@@ -248,6 +267,7 @@ npm test
 ```
 
 既存のUSB、音声、app-server契約テストに加え、Vitestで会話Tone、セッション状態遷移、再試行スーパーバイザー、WebRTC transport、ICE consent freshnessを検査します。
+FFmpegの`rubberband`が利用可能な環境では、長さを保ったまま440 Hzが+3半音へ変換されることも検査します。
 Vitestだけを実行する場合:
 
 ```bash
@@ -264,7 +284,7 @@ ICEテストは、単発のSTUN応答欠落後も監視を続けること、4秒
 - CoreS3のOKは一回限りの`accept`、NGは`decline`として返します。
 - `acceptForSession`やpolicy amendmentへ自動変換しません。
 - コマンド実行とファイル変更以外のserver requestは明示的なunsupported errorで拒否します。
-- `stackchan.get_status`だけを固定dynamic toolとして公開し、USB接続と会話状態を読み取り専用で返します。
+- `stackchan.get_status`だけを固定dynamic toolとして公開し、USB接続、会話状態、Codex task状態を読み取り専用で返します。
 - workspace skillはツールの利用方針だけを定義し、任意コードをdynamic toolとして登録しません。
 - 承認中にUSBが切断されても要求を解決せず、再接続または別CLIからの解決を待ちます。
 - シグナル終了時と再試行不能エラー時は、未解決の承認を拒否してからdaemonとのWebSocket接続を閉じます。
@@ -274,13 +294,18 @@ ICEテストは、単発のSTUN応答欠落後も監視を続けること、4秒
 
 - CoreS3入力: PCM16LE mono、16kHz、20ms
 - WebRTC入力: PCM16LE monoを48kHzへ逐次変換し、実音声または無音を20ms単位で連続してOpus/RTP化
-- WebRTC出力: remote Opus/RTPを48kHz mono PCMへデコード
+- WebRTC出力: remote Opus/RTPを120msのjitter bufferで整列し、欠落をin-band FECまたは20ms単位のPLCで補って48kHz mono PCMへデコード
+- `cute`有効時: 48kHz PCMをFFmpeg `rubberband`で+3半音へ逐次変換
 - 出力prebuffer: 240ms
 - CoreS3出力: PCM16LE mono、24kHz、80ms frame、speaker credit制御
 
 実機検証では、WebRTCマイク入力から生成された応答に`thread/realtime/outputAudio/delta`が通知されず、応答音声はremote RTPだけに届きました。
-ブリッジはremote RTPを再生の正本とし、app-serverの`thread/realtime/transcript/done`を終端の補助信号として使います。
-終端通知より遅れて届いたRTPは新しい応答として再生せず、現在の再生を切断するエラーにも変換しません。
+ブリッジはremote RTPを再生の正本とします。
+`thread/realtime/transcript/done`は音声より先に届くため再生終端には使いません。
+remote RTPは無発話中も流れ続けるため、RTP idleも再生終端には使いません。
+data channelの`turn.done.end_ms`をセッション先頭の48kHz RTP timestampへ対応づけ、jitter bufferの再生位置がその時刻へ達してから出力queueを閉じます。
+data channelとRTPの到着順には依存せず、PCMの可聴判定も終端計算には使いません。
+Frameless Bidi v3が`turn.done`または対応するRTP境界を欠落させた場合は、正常終了を推測せず5秒のライフサイクル監視後にセッション障害として再接続します。
 
 USB wire contractは[`contracts/usb-cdc-v2`](../../contracts/usb-cdc-v2/README.md)を参照してください。
 

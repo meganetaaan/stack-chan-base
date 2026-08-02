@@ -29,6 +29,7 @@ workspaceルートの`AGENTS.md`と`.agents/skills`はCodex自身に発見させ
 ## 会話状態
 
 ブリッジは、ユーザーが会話を希望しているかを表すdesired stateと、実際のRealtime状態を分けて管理する。
+これとは独立して、Codex app-serverのthread statusを`idle`または`running`へ正規化し、バックグラウンドtask状態として表示する。
 
 | 内部状態 | Realtime | CoreS3マイク | 画面 |
 | --- | --- | --- | --- |
@@ -62,6 +63,10 @@ Firmwareは結果を受信するまで、同じ`requestId`を2秒ごとに再送
 
 状態表示にはcapability bit 11の`STATUS_EXTENDED`を使用する。
 未対応Firmwareでは`listening`、`connecting`、`error`を`IDLE`へ縮退させ、音声経路は継続する。
+
+Codex threadの`active`は`task.status` application eventの`running`として通知する。
+thread openの応答と`thread/status/changed`通知を同じ状態源として扱い、通知を先に購読してopen直後の競合を取りこぼさない。
+task状態は会話用`STATUS`と独立しており、USB切断時はFirmware側で`idle`へ戻す。
 
 wire形式は[`contracts/usb-cdc-v2`](../../../contracts/usb-cdc-v2/README.md)に定義する。
 
@@ -116,7 +121,7 @@ dock appは同一streamの`MIC_STOP`を500ミリ秒ごとに再送し、Firmware
 ## ツール
 
 読み取り専用の`stackchan.get_status`をapp-server dynamic toolとして固定登録し、
-USB接続、会話状態、desired stateを返す。
+USB接続、会話状態、desired state、task stateを返す。
 workspaceローカルの`.agents/skills/stackchan/SKILL.md`は利用方針だけを保持し、
 任意のツール定義や実行コードは読み込まない。
 

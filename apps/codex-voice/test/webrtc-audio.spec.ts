@@ -3,6 +3,7 @@ import type { RtpPacket } from 'werift'
 import {
   OpusRtpAudioDecoder,
   OpusRtpAudioSender,
+  createWebRtcOpusEncoder,
   WEBRTC_AUDIO_FRAME_MILLISECONDS,
   WEBRTC_AUDIO_FRAME_SAMPLES,
 } from '../src/audio/webrtc.js'
@@ -17,14 +18,15 @@ describe('OpusRtpAudioSender pacing', () => {
     vi.useRealTimers()
   })
 
-  it('keeps the RTP audio timeline alive with one silence packet every 20 ms', () => {
+  it('keeps the RTP audio timeline alive with one silence packet every 20 ms', async () => {
     const packets: RtpPacket[] = []
+    const encoder = await createWebRtcOpusEncoder()
     const sender = new OpusRtpAudioSender({
       writeRtp(packet) {
         if (Buffer.isBuffer(packet)) throw new Error('unexpected serialized RTP packet')
         packets.push(packet)
       },
-    })
+    }, { encoder })
 
     sender.start()
     vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 3)
@@ -36,25 +38,28 @@ describe('OpusRtpAudioSender pacing', () => {
       ).toBe(WEBRTC_AUDIO_FRAME_SAMPLES)
     }
 
-    const decoder = new OpusRtpAudioDecoder()
+    const decoder = await OpusRtpAudioDecoder.create()
     for (const packet of packets) {
       const decoded = decodePcm16Le(decoder.decode(packet).data)
       expect(Math.max(...decoded.map(Math.abs))).toBe(0)
     }
 
     sender.stop()
+    decoder.close()
+    encoder.free()
     vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 2)
     expect(packets).toHaveLength(3)
   })
 
-  it('uses queued microphone PCM for the next slot and falls back to silence afterwards', () => {
+  it('uses queued microphone PCM for the next slot and falls back to silence afterwards', async () => {
     const packets: RtpPacket[] = []
+    const encoder = await createWebRtcOpusEncoder()
     const sender = new OpusRtpAudioSender({
       writeRtp(packet) {
         if (Buffer.isBuffer(packet)) throw new Error('unexpected serialized RTP packet')
         packets.push(packet)
       },
-    })
+    }, { encoder })
     const microphoneFrame = pcmChunk(
       encodePcm16Le(
         Int16Array.from({ length: WEBRTC_AUDIO_FRAME_SAMPLES }, (_, index) =>
@@ -69,7 +74,7 @@ describe('OpusRtpAudioSender pacing', () => {
     vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 6)
 
     expect(packets).toHaveLength(6)
-    const decoder = new OpusRtpAudioDecoder()
+    const decoder = await OpusRtpAudioDecoder.create()
     const microphoneOutput = decodePcm16Le(decoder.decode(packets[0]!).data)
     const silenceOutputs = packets
       .slice(1)
@@ -79,16 +84,19 @@ describe('OpusRtpAudioSender pacing', () => {
     expect(Math.max(...silenceOutput.map(Math.abs))).toBeLessThan(100)
 
     sender.stop()
+    decoder.close()
+    encoder.free()
   })
 
-  it('continues silence pacing while microphone state is reset', () => {
+  it('continues silence pacing while microphone state is reset', async () => {
     const packets: RtpPacket[] = []
+    const encoder = await createWebRtcOpusEncoder()
     const sender = new OpusRtpAudioSender({
       writeRtp(packet) {
         if (Buffer.isBuffer(packet)) throw new Error('unexpected serialized RTP packet')
         packets.push(packet)
       },
-    })
+    }, { encoder })
 
     sender.start()
     sender.reset()
@@ -96,5 +104,6 @@ describe('OpusRtpAudioSender pacing', () => {
 
     expect(packets).toHaveLength(2)
     sender.stop()
+    encoder.free()
   })
 })

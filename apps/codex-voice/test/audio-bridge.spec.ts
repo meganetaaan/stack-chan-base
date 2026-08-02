@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Deferred } from '../src/async.js'
 import { RealtimeAudioBridge, type AudioBridgeLogger } from '../src/audio/bridge.js'
 import { decodePcm16Le, encodePcm16Le, pcmChunk } from '../src/audio/pcm.js'
@@ -169,7 +169,7 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     await expect(running).rejects.toThrow('source test finished')
   })
 
-  it('does not fail when delayed mirrored RTP arrives after transcript completion', async () => {
+  it('plays RTP arriving after transcript completion until the media boundary', async () => {
     const appServer = new FakeAppServer()
     const device = new HoldingPlaybackDevice()
     const session = new FakeRealtimeSession()
@@ -195,12 +195,58 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     emitAssistantTranscriptDone(appServer)
     await new Promise((resolve) => setTimeout(resolve, 550))
     session.emit('audio', mirroredRtpFrame(2_000))
+    await waitUntil(() => device.playbackChunks.length >= 13)
+    session.emit('audioEnd', {
+      id: 'turn-1',
+      startMilliseconds: 0,
+      endMilliseconds: 260,
+      transcript: 'done',
+    })
 
     expect(errors).toEqual([])
+    expect(device.playbackChunks).toHaveLength(13)
 
     controller.abort(new Error('late RTP test finished'))
     device.playbackDrained.resolve()
     await expect(running).rejects.toThrow('late RTP test finished')
+  })
+
+  it('fails instead of waiting forever when v3 omits the output media boundary', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+
+    try {
+      session.emit('audio', mirroredRtpFrame(2_000))
+      emitAssistantTranscriptDone(appServer)
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(errors).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(errors).toEqual([
+        '音声ブリッジエラー: Codex v3 completed the assistant transcript without reaching its declared RTP media boundary',
+      ])
+
+      device.playbackDrained.resolve()
+      await expect(running).rejects.toThrow(
+        'without reaching its declared RTP media boundary',
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('rejects malformed remote RTP PCM at the session boundary', async () => {

@@ -1,19 +1,14 @@
-import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { decodePcm16Le, encodePcm16Le } from '../src/audio/pcm.js'
-
-const require = createRequire(import.meta.url)
-const { OpusEncoder } = require('@discordjs/opus') as {
-  OpusEncoder: new (sampleRate: number, channels: number) => {
-    encode(buffer: Buffer): Buffer
-  }
-}
+import { decodePcm16Le } from '../src/audio/pcm.js'
 
 const mockWebRtc = vi.hoisted(() => ({
   peer: undefined as
     | {
         connectionState: 'connected' | 'disconnected' | 'failed' | 'closed'
-        dataChannel: { setState(state: 'open' | 'closed'): void }
+        dataChannel: {
+          setState(state: 'open' | 'closed'): void
+          emitMessage(event: Record<string, unknown>): void
+        }
         setConnectionState(state: 'connected' | 'disconnected' | 'failed' | 'closed'): void
       }
     | undefined,
@@ -49,6 +44,10 @@ vi.mock('werift', () => {
       this.stateChanged.emit(state)
     }
 
+    emitMessage(event: Record<string, unknown>): void {
+      this.onMessage.emit(JSON.stringify(event))
+    }
+
     close(): void {
       this.setState('closed')
     }
@@ -56,8 +55,15 @@ vi.mock('werift', () => {
 
   class FakeMediaStreamTrack {
     readonly kind: string
-    readonly onReceiveRtp = new Signal<[{ payload: Buffer }]>()
+    readonly onReceiveRtp = new Signal<[
+      {
+        header: { sequenceNumber: number; timestamp: number; ssrc: number }
+        payload: Buffer
+      },
+    ]>()
     codec: { mimeType: string } | undefined
+    #sequenceNumber = 0
+    #timestamp = 0
 
     constructor(options: { kind: string }) {
       this.kind = options.kind
@@ -68,7 +74,16 @@ vi.mock('werift', () => {
     stop(): void {}
 
     emitRtp(payload: Buffer): void {
-      this.onReceiveRtp.emit({ payload })
+      this.onReceiveRtp.emit({
+        header: {
+          sequenceNumber: this.#sequenceNumber,
+          timestamp: this.#timestamp,
+          ssrc: 1,
+        },
+        payload,
+      })
+      this.#sequenceNumber = (this.#sequenceNumber + 1) & 0xffff
+      this.#timestamp = (this.#timestamp + 960) >>> 0
     }
   }
 
@@ -142,7 +157,10 @@ vi.mock('werift', () => {
   }
 })
 
-import { RealtimeWebRtcSession } from '../src/audio/webrtc.js'
+import {
+  RealtimeWebRtcSession,
+  createWebRtcOpusEncoder,
+} from '../src/audio/webrtc.js'
 import type { CodexAppServer } from '../src/codex/app-server.js'
 
 describe('RealtimeWebRtcSession transport liveness', () => {
@@ -173,19 +191,74 @@ describe('RealtimeWebRtcSession transport liveness', () => {
       voice: 'juniper',
       prompt: '日本語で話してください。',
     })
-    const encoder = new OpusEncoder(48_000, 1)
+    const encoder = await createWebRtcOpusEncoder()
     const samples = Int16Array.from({ length: 960 }, (_, index) =>
       Math.round(Math.sin(index / 8) * 4_000),
     )
 
     mockWebRtc.remoteTrack!.emitRtp(
-      encoder.encode(Buffer.from(encodePcm16Le(samples))),
+      Buffer.from(encoder.encode(samples)),
     )
 
     const chunk = await received
     expect(chunk.sampleRate).toBe(48_000)
     expect(chunk.channels).toBe(1)
     expect(Math.max(...decodePcm16Le(chunk.data).map(Math.abs))).toBeGreaterThan(100)
+    encoder.free()
+  })
+
+  it('emits audioEnd only after RTP playout reaches turn.done end_ms', async () => {
+    vi.useFakeTimers()
+    const appServer = {
+      startRealtime: vi.fn(async () => 'v=0\r\n'),
+      stopRealtime: vi.fn(async () => undefined),
+    } as unknown as CodexAppServer
+    const session = new RealtimeWebRtcSession(appServer)
+    sessions.push(session)
+
+    try {
+      await session.start()
+      const audioEnd = vi.fn()
+      session.on('audioEnd', audioEnd)
+      mockWebRtc.peer!.dataChannel.emitMessage({
+        type: 'turn.created',
+        turn: { id: 'assistant-1', role: 'assistant', start_ms: 0 },
+      })
+
+      const encoder = await createWebRtcOpusEncoder()
+      const encoded = Buffer.from(encoder.encode(
+        Int16Array.from({ length: 960 }, (_, index) =>
+          Math.round(Math.sin(index / 8) * 4_000),
+        ),
+      ))
+      mockWebRtc.peer!.dataChannel.emitMessage({
+        type: 'turn.done',
+        turn: {
+          id: 'assistant-1',
+          role: 'assistant',
+          start_ms: 0,
+          end_ms: 40,
+          transcript: 'テストです',
+        },
+      })
+      mockWebRtc.remoteTrack!.emitRtp(encoded)
+      mockWebRtc.remoteTrack!.emitRtp(encoded)
+
+      await vi.advanceTimersByTimeAsync(139)
+      expect(audioEnd).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(audioEnd).toHaveBeenCalledOnce()
+      expect(audioEnd).toHaveBeenCalledWith({
+        id: 'assistant-1',
+        startMilliseconds: 0,
+        endMilliseconds: 40,
+        transcript: 'テストです',
+      })
+      encoder.free()
+    } finally {
+      await session.close()
+      vi.useRealTimers()
+    }
   })
 
   it('does not end an established media session on data-channel close alone', async () => {

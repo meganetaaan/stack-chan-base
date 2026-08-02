@@ -10,8 +10,9 @@ import {
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { parse, stringify } from 'smol-toml'
+import type { VoiceEffect } from './audio/voice-effect.js'
 
-export const WORKSPACE_SCHEMA_VERSION = 1
+export const WORKSPACE_SCHEMA_VERSION = 2
 export const STACKCHAN_DIRECTORY = '.stackchan'
 export const SESSION_CONFIG_FILE = 'session.toml'
 export const REALTIME_PROMPT_FILE = 'realtime-prompt.md'
@@ -23,11 +24,14 @@ export const STACKCHAN_SKILL_FILE = join(
 )
 export const ACTIVE_WORKSPACE_FILE = 'active-workspace'
 
-const SESSION_KEYS = new Set(['schema_version', 'voice'])
+const LEGACY_WORKSPACE_SCHEMA_VERSION = 1
+const SESSION_KEYS_V1 = new Set(['schema_version', 'voice'])
+const SESSION_KEYS_V2 = new Set(['schema_version', 'voice', 'voice_effect'])
 
 export type WorkspaceSessionConfig = {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   voice?: string
+  voiceEffect?: VoiceEffect
 }
 
 export type LoadedWorkspace = {
@@ -178,9 +182,27 @@ export async function setWorkspaceVoice(
   }
   await atomicWrite(
     workspace.configPath,
-    stringify({
-      schema_version: WORKSPACE_SCHEMA_VERSION,
+    stringifySessionConfig({
       ...(normalized ? { voice: normalized } : {}),
+      ...(workspace.session.voiceEffect ? { voiceEffect: workspace.session.voiceEffect } : {}),
+    }),
+  )
+  return loadWorkspace(workspace.root)
+}
+
+export async function setWorkspaceVoiceEffect(
+  requestedRoot: string,
+  voiceEffect: VoiceEffect | undefined,
+): Promise<LoadedWorkspace> {
+  if (voiceEffect !== undefined && voiceEffect !== 'cute') {
+    throw new Error(`未対応のvoice effectです: ${String(voiceEffect)}`)
+  }
+  const workspace = await loadWorkspace(requestedRoot)
+  await atomicWrite(
+    workspace.configPath,
+    stringifySessionConfig({
+      ...(workspace.session.voice ? { voice: workspace.session.voice } : {}),
+      ...(voiceEffect ? { voiceEffect } : {}),
     }),
   )
   return loadWorkspace(workspace.root)
@@ -230,6 +252,7 @@ export function workspaceSummary(workspace: LoadedWorkspace): string {
     `workspace: ${workspace.root}`,
     `name: ${basename(workspace.root)}`,
     `voice: ${workspace.session.voice ?? '(app-server default)'}`,
+    `voice effect: ${workspace.session.voiceEffect ?? '(disabled)'}`,
     `realtime prompt: ${workspace.realtimePromptPath}`,
     `skill: ${join(workspace.root, STACKCHAN_SKILL_FILE)}`,
   ].join('\n')
@@ -240,22 +263,47 @@ function validateSessionConfig(
   path: string,
 ): WorkspaceSessionConfig {
   if (!isRecord(value)) throw new Error(`workspace設定はTOML tableである必要があります: ${path}`)
-  const unknown = Object.keys(value).filter((key) => !SESSION_KEYS.has(key))
+  const schemaVersion = value.schema_version
+  if (
+    schemaVersion !== LEGACY_WORKSPACE_SCHEMA_VERSION &&
+    schemaVersion !== WORKSPACE_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      `workspace schema_versionは${LEGACY_WORKSPACE_SCHEMA_VERSION}または${WORKSPACE_SCHEMA_VERSION}である必要があります`,
+    )
+  }
+  const keys = schemaVersion === LEGACY_WORKSPACE_SCHEMA_VERSION
+    ? SESSION_KEYS_V1
+    : SESSION_KEYS_V2
+  const unknown = Object.keys(value).filter((key) => !keys.has(key))
   if (unknown.length > 0) {
     throw new Error(`workspace設定に未知のキーがあります: ${unknown.join(', ')}`)
-  }
-  if (value.schema_version !== WORKSPACE_SCHEMA_VERSION) {
-    throw new Error(
-      `workspace schema_versionは${WORKSPACE_SCHEMA_VERSION}である必要があります`,
-    )
   }
   if ('voice' in value && (typeof value.voice !== 'string' || value.voice.trim().length === 0)) {
     throw new Error('workspace voiceは空でない文字列である必要があります')
   }
-  return {
-    schemaVersion: WORKSPACE_SCHEMA_VERSION,
-    ...(typeof value.voice === 'string' ? { voice: value.voice.trim() } : {}),
+  if (
+    schemaVersion === WORKSPACE_SCHEMA_VERSION &&
+    'voice_effect' in value &&
+    value.voice_effect !== 'cute'
+  ) {
+    throw new Error('workspace voice_effectは"cute"である必要があります')
   }
+  return {
+    schemaVersion,
+    ...(typeof value.voice === 'string' ? { voice: value.voice.trim() } : {}),
+    ...(value.voice_effect === 'cute' ? { voiceEffect: value.voice_effect } : {}),
+  }
+}
+
+function stringifySessionConfig(
+  session: Pick<WorkspaceSessionConfig, 'voice' | 'voiceEffect'>,
+): string {
+  return stringify({
+    schema_version: WORKSPACE_SCHEMA_VERSION,
+    ...(session.voice ? { voice: session.voice } : {}),
+    ...(session.voiceEffect ? { voice_effect: session.voiceEffect } : {}),
+  })
 }
 
 async function atomicWrite(path: string, contents: string): Promise<void> {

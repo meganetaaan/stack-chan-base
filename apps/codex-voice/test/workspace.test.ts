@@ -10,7 +10,9 @@ import {
   loadWorkspace,
   setActiveWorkspace,
   setWorkspaceVoice,
+  setWorkspaceVoiceEffect,
   STACKCHAN_SKILL_FILE,
+  WORKSPACE_SCHEMA_VERSION,
   workspaceConfigPath,
   workspaceRealtimePromptPath,
 } from '../src/workspace.js'
@@ -30,7 +32,7 @@ test('workspace init creates config, prompt, AGENTS, and repo-local skill withou
     assert.ok(second.existing.includes(workspaceConfigPath(directory)))
 
     const loaded = await loadWorkspace(directory)
-    assert.deepEqual(loaded.session, { schemaVersion: 1 })
+    assert.deepEqual(loaded.session, { schemaVersion: WORKSPACE_SCHEMA_VERSION })
     assert.match(loaded.realtimePrompt, /日本語/)
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -41,10 +43,66 @@ test('workspace voice is updated and unset through a canonical TOML document', a
   const directory = await mkdtemp(join(tmpdir(), 'stackchan-workspace-'))
   try {
     await initializeWorkspace(directory)
+    await setWorkspaceVoiceEffect(directory, 'cute')
     assert.equal((await setWorkspaceVoice(directory, ' juniper ')).session.voice, 'juniper')
-    assert.match(await readFile(workspaceConfigPath(directory), 'utf8'), /voice = "juniper"/)
-    assert.equal((await setWorkspaceVoice(directory, undefined)).session.voice, undefined)
-    assert.doesNotMatch(await readFile(workspaceConfigPath(directory), 'utf8'), /voice/)
+    const configured = await readFile(workspaceConfigPath(directory), 'utf8')
+    assert.match(configured, /schema_version = 2/)
+    assert.match(configured, /voice = "juniper"/)
+    assert.match(configured, /voice_effect = "cute"/)
+    const voiceUnset = await setWorkspaceVoice(directory, undefined)
+    assert.equal(voiceUnset.session.voice, undefined)
+    assert.equal(voiceUnset.session.voiceEffect, 'cute')
+    assert.doesNotMatch(
+      await readFile(workspaceConfigPath(directory), 'utf8'),
+      /^voice =/m,
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('workspace voice effect is set and unset without losing the selected voice', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'stackchan-workspace-'))
+  try {
+    await initializeWorkspace(directory)
+    await setWorkspaceVoice(directory, 'juniper')
+    const enabled = await setWorkspaceVoiceEffect(directory, 'cute')
+    assert.deepEqual(enabled.session, {
+      schemaVersion: 2,
+      voice: 'juniper',
+      voiceEffect: 'cute',
+    })
+    const disabled = await setWorkspaceVoiceEffect(directory, undefined)
+    assert.deepEqual(disabled.session, {
+      schemaVersion: 2,
+      voice: 'juniper',
+    })
+    assert.doesNotMatch(
+      await readFile(workspaceConfigPath(directory), 'utf8'),
+      /voice_effect/,
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('workspace schema v1 remains readable with voice effects disabled', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'stackchan-workspace-'))
+  try {
+    await initializeWorkspace(directory)
+    await writeFile(
+      workspaceConfigPath(directory),
+      'schema_version = 1\nvoice = "juniper"\n',
+    )
+    assert.deepEqual((await loadWorkspace(directory)).session, {
+      schemaVersion: 1,
+      voice: 'juniper',
+    })
+    await writeFile(
+      workspaceConfigPath(directory),
+      'schema_version = 1\nvoice_effect = "cute"\n',
+    )
+    await assert.rejects(loadWorkspace(directory), /未知のキー/)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -57,10 +115,16 @@ test('workspace validation rejects unknown keys, unsupported schema, and empty p
     await writeFile(workspaceConfigPath(directory), 'schema_version = 1\nunknown = true\n')
     await assert.rejects(loadWorkspace(directory), /未知のキー/)
 
-    await writeFile(workspaceConfigPath(directory), 'schema_version = 2\n')
+    await writeFile(workspaceConfigPath(directory), 'schema_version = 3\n')
     await assert.rejects(loadWorkspace(directory), /schema_version/)
 
-    await writeFile(workspaceConfigPath(directory), 'schema_version = 1\n')
+    await writeFile(
+      workspaceConfigPath(directory),
+      'schema_version = 2\nvoice_effect = "robot"\n',
+    )
+    await assert.rejects(loadWorkspace(directory), /voice_effect/)
+
+    await writeFile(workspaceConfigPath(directory), 'schema_version = 2\n')
     await writeFile(workspaceRealtimePromptPath(directory), '  \n')
     await assert.rejects(loadWorkspace(directory), /Realtime promptが空/)
   } finally {

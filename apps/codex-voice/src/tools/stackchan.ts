@@ -4,6 +4,7 @@ import type {
   RpcServerRequest,
 } from '../codex/rpc.js'
 import type { ConversationSessionState } from '../types.js'
+import type { TaskExecutionState } from '../types.js'
 
 export const STACKCHAN_DYNAMIC_TOOLS: DynamicToolSpec[] = [
   {
@@ -14,7 +15,7 @@ export const STACKCHAN_DYNAMIC_TOOLS: DynamicToolSpec[] = [
       {
         type: 'function',
         name: 'get_status',
-        description: 'USB接続状態と現在の会話状態を取得する。状態は変更しない。',
+        description: 'USB接続状態、会話状態、タスク実行状態を取得する。状態は変更しない。',
         inputSchema: {
           type: 'object',
           properties: {},
@@ -28,6 +29,7 @@ export const STACKCHAN_DYNAMIC_TOOLS: DynamicToolSpec[] = [
 export type StackChanStatus = {
   connected: boolean
   conversationState: ConversationSessionState
+  taskState: TaskExecutionState
   desired: boolean
 }
 

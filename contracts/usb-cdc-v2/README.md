@@ -123,6 +123,23 @@ Codex音声ブリッジは、コマンド実行とファイル変更を次の共
 | Firmware → Dock app | `conversation.start` | 頭上センサの前方スワイプによる会話開始を要求する |
 | Firmware → Dock app | `conversation.stop` | 頭上センサの後方スワイプによる会話停止を要求する |
 | Dock app → Firmware | `conversation.result` | 会話操作の受理結果と現在状態を返す |
+| Dock app → Firmware | `task.status` | Codex threadのバックグラウンド実行状態を通知する |
+
+`task.status`は音声入出力の状態とは独立した表示軸であり、次の形にする。
+
+```json
+{
+  "schema": "stackchan.event.v1",
+  "type": "task.status",
+  "requestId": "task-a1b2c3d4",
+  "state": "running"
+}
+```
+
+`state`は`idle`または`running`とする。
+Codex app-serverのthread statusが`active`の間だけ`running`とし、`idle`、`notLoaded`、`systemError`は`idle`へ正規化する。
+Firmwareは最新値だけを保持し、USB transport切断時は`idle`へ戻す。
+このeventは既存の`STATUS`値および会話状態を変更しない。
 
 会話開始要求は次の形にする。
 

@@ -2,6 +2,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   ConversationSessionState,
+  TaskExecutionState,
 } from '../types.js'
 
 export const STACKCHAN_EVENT_SCHEMA = 'stackchan.event.v1'
@@ -71,6 +72,13 @@ export type ConversationResultEvent = {
   error?: string
 }
 
+export type TaskStatusEvent = {
+  schema: typeof STACKCHAN_EVENT_SCHEMA
+  type: 'task.status'
+  requestId: string
+  state: TaskExecutionState
+}
+
 export type StackChanApplicationEvent =
   | ApprovalRequestEvent
   | ApprovalPresentedEvent
@@ -79,6 +87,7 @@ export type StackChanApplicationEvent =
   | ApprovalSuspendedEvent
   | ConversationRequestEvent
   | ConversationResultEvent
+  | TaskStatusEvent
 
 export function approvalRequestEvent(request: ApprovalRequest): ApprovalRequestEvent {
   return {
@@ -106,6 +115,18 @@ export function conversationResultEvent(
     success,
     state,
     ...(error === undefined ? {} : { error }),
+  }
+}
+
+export function taskStatusEvent(
+  requestId: string,
+  state: TaskExecutionState,
+): TaskStatusEvent {
+  return {
+    schema: STACKCHAN_EVENT_SCHEMA,
+    type: 'task.status',
+    requestId,
+    state,
   }
 }
 
@@ -157,6 +178,9 @@ export function parseStackChanApplicationEvent(serialized: string): StackChanApp
         return undefined
       }
       return value as ConversationResultEvent
+    case 'task.status':
+      if (value.state !== 'idle' && value.state !== 'running') return undefined
+      return value as TaskStatusEvent
     default:
       return undefined
   }

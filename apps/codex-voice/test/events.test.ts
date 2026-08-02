@@ -5,6 +5,7 @@ import {
   conversationResultEvent,
   parseStackChanApplicationEvent,
   STACKCHAN_EVENT_SCHEMA,
+  taskStatusEvent,
   truncateUtf8,
 } from '../src/usb/events.js'
 import { loadContractFixture } from './contract-fixtures.js'
@@ -99,6 +100,20 @@ test('conversation result validates state and optional error', () => {
   assert.deepEqual(parseStackChanApplicationEvent(JSON.stringify(rejected)), rejected)
   assert.equal(
     parseStackChanApplicationEvent(JSON.stringify({ ...accepted, state: 'unknown' })),
+    undefined,
+  )
+})
+
+test('task status is an independent idle or running snapshot', () => {
+  const running = taskStatusEvent('task-1', 'running')
+  const idle = taskStatusEvent('task-2', 'idle')
+
+  assert.deepEqual(parseStackChanApplicationEvent(JSON.stringify(running)), running)
+  assert.deepEqual(parseStackChanApplicationEvent(JSON.stringify(idle)), idle)
+  assert.equal(
+    parseStackChanApplicationEvent(
+      JSON.stringify({ ...running, state: 'speaking' }),
+    ),
     undefined,
   )
 })

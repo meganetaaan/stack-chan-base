@@ -5,6 +5,7 @@ import {
   type RealtimeAudioState,
   type RealtimeAudioStateSink,
 } from '../audio/bridge.js'
+import type { VoiceEffect } from '../audio/voice-effect.js'
 import {
   type ConversationChimeKind,
   type ConversationChimePlayer,
@@ -43,6 +44,7 @@ export type ConversationSessionControllerOptions = {
   audioFactory?: ConversationAudioFactory
   feedback?: ConversationChimePlayer
   realtimePrompt?: string
+  voiceEffect?: VoiceEffect
 }
 
 type Attachment = {
@@ -90,6 +92,9 @@ export class ConversationSessionController {
           undefined,
           onStateChanged,
           options.realtimePrompt,
+          {
+            ...(options.voiceEffect ? { voiceEffect: options.voiceEffect } : {}),
+          },
         ))
     this.#feedback = options.feedback ?? new UsbConversationChimePlayer(device)
     this.#unsubscribeRequest = device.onConversationRequest((request) => {

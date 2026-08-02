@@ -39,7 +39,27 @@ CoreS3のマイク入力がない時間とCoreS3が応答を再生している�
 WebRTCマイクから発話した実機試験では、ユーザー文字起こしとassistant transcriptはsidebandへ通知されましたが、`thread/realtime/outputAudio/delta`は通知されませんでした。
 同じ応答のOpus/RTPはremote audio trackへ届いていたため、ブリッジはremote RTPを48kHz mono PCMへデコードし、24kHzへ変換してCoreS3へ送ります。
 sideband PCMを再生元にした旧実装はassistant transcriptまで進んでも無音になったため、再生経路から削除しました。
-remote RTPとsideband上のassistant transcript完了にはtransportをまたぐ順序保証がないため、遅延RTPを新しい応答として再生したりセッションエラーへ変換したりしません。
+remote RTPとsideband上のassistant transcript完了にはtransportをまたぐ順序保証がなく、実測ではtranscript完了が音声末尾より約2秒早く届きました。
+このためtranscript完了を再生終端には使いません。
+公開Realtime APIの`output_audio_buffer.stopped`に相当するイベントはFrameless Bidi v3へ露出していません。
+またremote RTPは無発話中も20ms周期で流れ続けるため、RTP idleも再生終端を表しません。
+3回の独立セッションで、最初のremote RTP timestampを原点とした48kHzメディア時刻と、`turn.created.start_ms`および`turn.done.end_ms`の対応を確認しました。
+このv3固有の対応に基づき、セッション最初のRTP packetから原点を保存し、`turn.done.end_ms`をRTP timestampへ変換します。
+jitter bufferの再生位置が変換後の終端へ達した時だけ出力queueを閉じます。
+原点はturnイベントより前に保存するため、data channelとRTPの到着順が逆転しても失われず、PCMの可聴判定も境界へ影響しません。
+SSRC変更などで同じメディア時計を維持できない場合は終端を推測せずtransport errorにします。
+
+これは公開Realtime APIと同じイベント契約ではなく、CodexのFrameless Bidi v3に対するadapterです。
+assistant transcript完了後も5秒以内に`turn.done`と対応するRTP境界が成立しない場合は、正常終了として音声を切らず、protocol liveness errorとしてセッションを再接続します。
+この監視時間は音声終端を推定するgrace periodではなく、不完全なv3ライフサイクルを無期限待機しないための障害境界です。
+
+remote RTPは120msのjitter bufferでtimestamp順に再生します。
+sequence numberが連続したtimestamp gapはOpus DTXとして無音を出し、decoder状態は進めません。
+sequence numberが欠落した20ms frameは、最後の一つを次packetのin-band FECから復元し、それ以前をlibopusのPLCで進めます。
+次packetがまだない場合はRTP時刻を推測せず、無音を出しながら再bufferします。
+これによりDTX中も120msの先読みを回復し、発話再開時にFECを使える状態を保ちます。
+従来の実装はDTXとpacket欠落を同じデジタル無音として扱っていたため、decoder状態と先読み量を正しく維持できませんでした。
+Opus実装にはFECとframe-size指定PLCを公開する`libopus-wasm`を使い、ネイティブaddonへのローカルパッチは行いません。
 
 ## ネイティブ実装の評価
 
@@ -61,12 +81,11 @@ C++のlibwebrtcを直接組み込む案は、SDP、ICE、DTLS、SRTP、Opus、�
 
 ## 既知の依存監査警告
 
-現行lockfileに対する`npm audit --omit=dev`は、high 9件とcritical 1件を報告します。
-主な経路は`@discordjs/opus`からインストール補助用`@discordjs/node-pre-gyp`を経由する`tar`などと、`werift`から`werift-ice`を経由する`ip`です。
+現行lockfileに対する`npm audit --omit=dev`は、high 3件を報告します。
+経路は`werift`から`werift-ice`を経由する`ip`です。
 監査が提示する自動修正は直接依存の互換性を損なうdowngradeを含むため、適用していません。
-`tar`系はネイティブOpusのインストール時にだけ到達し、dock appの実行時にarchiveを処理しません。
 `ip`はICEのローカルアドレス分類に使われますが、修正版が公開されておらず、`werift`の互換性を保ったまま置換できません。
-この判断は脆弱性の解消ではなく、2026-07-26時点の期限付きwaiverであり、Opus実装またはWebRTC実装の更新時に再評価します。
+この判断は脆弱性の解消ではなく、2026-08-01時点の期限付きwaiverであり、WebRTC実装の更新時に再評価します。
 
 リリース検査は次を実行します。
 
@@ -75,5 +94,5 @@ npm run audit:release
 ```
 
 既定では既知の警告を含めて失敗します。
-リリース責任者が上記の到達可能性と配布対象を確認して例外を承認した場合だけ、`STACKCHAN_DEPENDENCY_WAIVER=codex-voice-2026-07-26`を設定して再実行します。
+リリース責任者が上記の到達可能性と配布対象を確認して例外を承認した場合だけ、`STACKCHAN_DEPENDENCY_WAIVER=codex-voice-2026-08-01`を設定して再実行します。
 検査スクリプトは許可したpackage名とadvisory IDを固定しており、新しい警告またはadvisoryが加わった場合はwaiverを指定しても失敗します。

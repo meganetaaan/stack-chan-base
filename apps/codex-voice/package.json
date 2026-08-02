@@ -33,7 +33,7 @@
     "audit:release": "node scripts/check-release-audit.mjs"
   },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
+    "libopus-wasm": "^0.2.0",
     "serialport": "^13.0.0",
     "smol-toml": "^1.7.1",
     "werift": "0.24.1",

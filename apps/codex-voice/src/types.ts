@@ -26,6 +26,8 @@ export type ConversationSessionState =
   | 'speaking'
   | 'blocked'
 
+export type TaskExecutionState = 'idle' | 'running'
+
 export type ApprovalKind = 'command' | 'fileChange'
 
 export type ApprovalRequest = {
@@ -60,6 +62,7 @@ export interface StackChanDevice {
   stopMicrophone(): Promise<void>
   playAudio(source: AsyncIterable<PcmChunk>, signal: AbortSignal): Promise<void>
   setConversationState(state: ConversationState): Promise<void>
+  setTaskState(state: TaskExecutionState): Promise<void>
   onConversationRequest(listener: (request: ConversationRequestEvent) => void): () => void
   sendConversationResult(result: ConversationResultEvent): Promise<void>
   requestApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision>

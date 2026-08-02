@@ -19,6 +19,8 @@ export type CliCommand =
   | { kind: 'config-validate'; workspacePath: string }
   | { kind: 'config-set-voice'; workspacePath: string; voice: string }
   | { kind: 'config-unset-voice'; workspacePath: string }
+  | { kind: 'config-set-voice-effect'; workspacePath: string; voiceEffect: 'cute' }
+  | { kind: 'config-unset-voice-effect'; workspacePath: string }
   | { kind: 'workspace-use'; workspacePath: string }
   | { kind: 'workspace-current' }
   | { kind: 'workspace-apply' }
@@ -125,14 +127,32 @@ function parseConfig(args: string[]): CliCommand {
           workspace: { type: 'string' },
         },
       })
-      if (parsed.positionals.length !== 2 || parsed.positionals[0] !== 'voice') {
-        throw new Error('Usage: stackchan-codex-voice config set voice <name> [--workspace DIR]')
+      if (parsed.positionals.length !== 2) {
+        throw new Error(
+          'Usage: stackchan-codex-voice config set <voice|voice-effect> <value> [--workspace DIR]',
+        )
       }
-      return {
-        kind: 'config-set-voice',
-        workspacePath: resolve(parsed.values.workspace ?? process.cwd()),
-        voice: parsed.positionals[1]!,
+      const workspacePath = resolve(parsed.values.workspace ?? process.cwd())
+      if (parsed.positionals[0] === 'voice') {
+        return {
+          kind: 'config-set-voice',
+          workspacePath,
+          voice: parsed.positionals[1]!,
+        }
       }
+      if (parsed.positionals[0] === 'voice-effect') {
+        if (parsed.positionals[1] !== 'cute') {
+          throw new Error('voice-effectはcuteだけを指定できます')
+        }
+        return {
+          kind: 'config-set-voice-effect',
+          workspacePath,
+          voiceEffect: 'cute',
+        }
+      }
+      throw new Error(
+        'Usage: stackchan-codex-voice config set <voice|voice-effect> <value> [--workspace DIR]',
+      )
     }
     case 'unset': {
       const parsed = parseArgs({
@@ -143,13 +163,27 @@ function parseConfig(args: string[]): CliCommand {
           workspace: { type: 'string' },
         },
       })
-      if (parsed.positionals.length !== 1 || parsed.positionals[0] !== 'voice') {
-        throw new Error('Usage: stackchan-codex-voice config unset voice [--workspace DIR]')
+      if (parsed.positionals.length !== 1) {
+        throw new Error(
+          'Usage: stackchan-codex-voice config unset <voice|voice-effect> [--workspace DIR]',
+        )
       }
-      return {
-        kind: 'config-unset-voice',
-        workspacePath: resolve(parsed.values.workspace ?? process.cwd()),
+      const workspacePath = resolve(parsed.values.workspace ?? process.cwd())
+      if (parsed.positionals[0] === 'voice') {
+        return {
+          kind: 'config-unset-voice',
+          workspacePath,
+        }
       }
+      if (parsed.positionals[0] === 'voice-effect') {
+        return {
+          kind: 'config-unset-voice-effect',
+          workspacePath,
+        }
+      }
+      throw new Error(
+        'Usage: stackchan-codex-voice config unset <voice|voice-effect> [--workspace DIR]',
+      )
     }
     default:
       throw new Error(`未知のconfig commandです: ${action ?? ''}`)
@@ -293,6 +327,8 @@ Commands:
   config validate [DIR]           workspace設定を検証
   config set voice <name>         Realtime voiceを設定
   config unset voice              app-server既定voiceへ戻す
+  config set voice-effect cute    かわいい声加工を有効化
+  config unset voice-effect       音声加工を無効化
   workspace use <DIR>             workspaceを選択して稼働中serviceへ反映
   workspace current               選択中workspaceを表示
   workspace apply                 選択中workspaceをserviceへ再反映

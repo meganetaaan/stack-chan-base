@@ -1,33 +1,13 @@
 import { spawnSync } from 'node:child_process'
 
-const WAIVER_ID = 'codex-voice-2026-07-26'
+const WAIVER_ID = 'codex-voice-2026-08-01'
 const allowedVulnerabilities = new Set([
-  '@discordjs/node-pre-gyp',
-  '@discordjs/opus',
-  'brace-expansion',
-  'glob',
   'ip',
-  'minimatch',
-  'rimraf',
-  'tar',
   'werift',
   'werift-ice',
 ])
 const allowedAdvisories = new Set([
   1_101_851,
-  1_112_659,
-  1_113_300,
-  1_113_375,
-  1_114_200,
-  1_114_302,
-  1_114_680,
-  1_120_782,
-  1_123_939,
-  1_123_940,
-  1_123_941,
-  1_123_942,
-  1_124_287,
-  1_124_334,
 ])
 
 const audit = spawnSync('npm', ['audit', '--omit=dev', '--json'], {
