@@ -416,7 +416,10 @@ export class RealtimeAudioBridge {
   #handleTranscriptDone(params: Record<string, unknown>): void {
     const role = typeof params.role === 'string' ? params.role : ''
     if (role === 'user') {
-      this.#resetAssistantOutputLifecycle()
+      // The data channel can overtake both ordered app-server transcript
+      // notifications. Preserve an observed assistant boundary until the
+      // following assistant transcript consumes it.
+      if (!this.#assistantAudioBoundaryDeclared) this.#resetAssistantOutputLifecycle()
       void this.#setState('recognizing')
       return
     }

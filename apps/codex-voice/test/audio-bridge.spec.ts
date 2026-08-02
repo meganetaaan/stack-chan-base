@@ -101,6 +101,17 @@ function emitAssistantTranscriptDone(appServer: FakeAppServer): void {
   })
 }
 
+function emitUserTranscriptDone(appServer: FakeAppServer): void {
+  appServer.emit('notification', {
+    method: 'thread/realtime/transcript/done',
+    params: {
+      threadId: appServer.threadId,
+      role: 'user',
+      text: 'request',
+    },
+  })
+}
+
 describe('RealtimeAudioBridge WebRTC output source', () => {
   const controllers: AbortController[] = []
   const devices: HoldingPlaybackDevice[] = []
@@ -298,7 +309,7 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     }
   })
 
-  it('matches a completed silent boundary when its transcript arrives later', async () => {
+  it('matches a completed silent boundary across delayed transcript notifications', async () => {
     vi.useFakeTimers()
     const appServer = new FakeAppServer()
     const device = new HoldingPlaybackDevice()
@@ -328,6 +339,7 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
       }
       session.emit('audioEndDeclared', silentTurn)
       session.emit('audioEnd', silentTurn)
+      emitUserTranscriptDone(appServer)
       emitAssistantTranscriptDone(appServer)
 
       await vi.advanceTimersByTimeAsync(5_000)
