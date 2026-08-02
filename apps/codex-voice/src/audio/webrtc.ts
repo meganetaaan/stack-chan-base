@@ -25,6 +25,7 @@ export const WEBRTC_AUDIO_FRAME_MILLISECONDS = 20
 
 const WEBRTC_START_TIMEOUT_MS = 30_000
 const WEBRTC_PEER_DISCONNECTED_GRACE_MS = 5_000
+const WEBRTC_AUDIO_BOUNDARY_STALL_MS = 5_000
 const WEBRTC_OPUS_BITRATE = 32_000
 const RTP_PAYLOAD_TYPE_FALLBACK = 111
 const RTP_TALKSPURT_GAP_MS = WEBRTC_AUDIO_FRAME_MILLISECONDS * 3
@@ -66,6 +67,7 @@ const defaultAudioSenderScheduler: OpusRtpAudioSenderScheduler = {
 type RealtimeWebRtcSessionEvents = {
   event: [event: Record<string, unknown>]
   audio: [chunk: PcmChunk]
+  audioEndDeclared: [turn: RealtimeAudioTurnEnd]
   audioEnd: [turn: RealtimeAudioTurnEnd]
   close: [error?: Error]
 }
@@ -85,9 +87,11 @@ export interface RealtimeAudioSession {
   close(): Promise<void>
   on(event: 'event', listener: (event: Record<string, unknown>) => void): this
   on(event: 'audio', listener: (chunk: PcmChunk) => void): this
+  on(event: 'audioEndDeclared', listener: (turn: RealtimeAudioTurnEnd) => void): this
   on(event: 'audioEnd', listener: (turn: RealtimeAudioTurnEnd) => void): this
   off(event: 'event', listener: (event: Record<string, unknown>) => void): this
   off(event: 'audio', listener: (chunk: PcmChunk) => void): this
+  off(event: 'audioEndDeclared', listener: (turn: RealtimeAudioTurnEnd) => void): this
   off(event: 'audioEnd', listener: (turn: RealtimeAudioTurnEnd) => void): this
 }
 
@@ -1034,6 +1038,8 @@ export class RealtimeWebRtcSession
   #sender: OpusRtpAudioSender | undefined
   #remoteAudioAttached = false
   readonly #audioBoundary = new RealtimeAudioClockBoundaryTracker()
+  #pendingAudioBoundary: RealtimeAudioTurnEnd | undefined
+  #audioBoundaryStallTimer: NodeJS.Timeout | undefined
   #peerDisconnectedTimer: NodeJS.Timeout | undefined
   #starting = false
   #started = false
@@ -1172,6 +1178,8 @@ export class RealtimeWebRtcSession
   async #close(): Promise<void> {
     this.#closing = true
     this.#clearPeerDisconnectedTimer()
+    this.#clearAudioBoundaryStallTimer()
+    this.#pendingAudioBoundary = undefined
     this.#sender?.stop()
     this.#audioBoundary.reset()
     for (const unsubscribe of this.#subscriptions.splice(0)) unsubscribe()
@@ -1211,10 +1219,9 @@ export class RealtimeWebRtcSession
         )
         this.emit('audio', chunk)
         if (completed) {
-          console.log(
-            `WebRTC assistant media boundary reached: turn=${completed.id} end_ms=${completed.endMilliseconds}`,
-          )
-          this.emit('audioEnd', completed)
+          this.#completeAudioBoundary(completed)
+        } else if (timing.advancesMediaTime && this.#pendingAudioBoundary) {
+          this.#scheduleAudioBoundaryStallFailure()
         }
       },
       ...(track.codec?.payloadType !== undefined
@@ -1282,11 +1289,12 @@ export class RealtimeWebRtcSession
             `WebRTC assistant turn done: turn=${turn.id} start_ms=${turn.startMilliseconds} end_ms=${turn.endMilliseconds}`,
           )
           const completed = this.#audioBoundary.finish(turn)
+          this.emit('audioEndDeclared', turn)
           if (completed) {
-            console.log(
-              `WebRTC assistant media boundary reached: turn=${completed.id} end_ms=${completed.endMilliseconds}`,
-            )
-            this.emit('audioEnd', completed)
+            this.#completeAudioBoundary(completed)
+          } else {
+            this.#pendingAudioBoundary = turn
+            this.#scheduleAudioBoundaryStallFailure()
           }
         }
       }
@@ -1332,6 +1340,36 @@ export class RealtimeWebRtcSession
     this.#peerDisconnectedTimer = undefined
   }
 
+  #completeAudioBoundary(turn: RealtimeAudioTurnEnd): void {
+    this.#clearAudioBoundaryStallTimer()
+    this.#pendingAudioBoundary = undefined
+    console.log(
+      `WebRTC assistant media boundary reached: turn=${turn.id} end_ms=${turn.endMilliseconds}`,
+    )
+    this.emit('audioEnd', turn)
+  }
+
+  #scheduleAudioBoundaryStallFailure(): void {
+    const pending = this.#pendingAudioBoundary
+    if (!pending || this.#closing || this.#finished) return
+    this.#clearAudioBoundaryStallTimer()
+    this.#audioBoundaryStallTimer = setTimeout(() => {
+      this.#audioBoundaryStallTimer = undefined
+      if (this.#pendingAudioBoundary !== pending || this.#closing || this.#finished) return
+      this.#fail(
+        new Error(
+          `WebRTC assistant RTP media clock stalled before turn=${pending.id} end_ms=${pending.endMilliseconds}`,
+        ),
+      )
+    }, WEBRTC_AUDIO_BOUNDARY_STALL_MS)
+  }
+
+  #clearAudioBoundaryStallTimer(): void {
+    if (!this.#audioBoundaryStallTimer) return
+    clearTimeout(this.#audioBoundaryStallTimer)
+    this.#audioBoundaryStallTimer = undefined
+  }
+
   #fail(error: unknown): void {
     if (this.#closing || this.#finished) return
     this.#finish(normalizeError(error))
@@ -1341,6 +1379,7 @@ export class RealtimeWebRtcSession
     if (this.#finished) return
     this.#finished = true
     this.#clearPeerDisconnectedTimer()
+    this.#clearAudioBoundaryStallTimer()
     this.#sender?.stop()
     this.#closedDeferred.resolve(error)
     this.emit('close', error)

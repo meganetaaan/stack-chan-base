@@ -305,7 +305,8 @@ ICEテストは、単発のSTUN応答欠落後も監視を続けること、4秒
 remote RTPは無発話中も流れ続けるため、RTP idleも再生終端には使いません。
 data channelの`turn.done.end_ms`をセッション先頭の48kHz RTP timestampへ対応づけ、jitter bufferの再生位置がその時刻へ達してから出力queueを閉じます。
 data channelとRTPの到着順には依存せず、PCMの可聴判定も終端計算には使いません。
-Frameless Bidi v3が`turn.done`または対応するRTP境界を欠落させた場合は、正常終了を推測せず5秒のライフサイクル監視後にセッション障害として再接続します。
+assistant transcript完了後も5秒以内に`turn.done`が宣言されない場合は、正常終了を推測せずセッション障害として再接続します。
+宣言後はWebRTC sessionがRTP media clockの進行を監視し、実メディア時刻が5秒停止した場合だけ境界到達不能として再接続します。
 
 USB wire contractは[`contracts/usb-cdc-v2`](../../contracts/usb-cdc-v2/README.md)を参照してください。
 

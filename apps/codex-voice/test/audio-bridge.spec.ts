@@ -193,15 +193,17 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     await waitUntil(() => device.playbackChunks.length >= 12)
 
     emitAssistantTranscriptDone(appServer)
-    await new Promise((resolve) => setTimeout(resolve, 550))
-    session.emit('audio', mirroredRtpFrame(2_000))
-    await waitUntil(() => device.playbackChunks.length >= 13)
-    session.emit('audioEnd', {
+    const turn = {
       id: 'turn-1',
       startMilliseconds: 0,
       endMilliseconds: 260,
       transcript: 'done',
-    })
+    }
+    session.emit('audioEndDeclared', turn)
+    await new Promise((resolve) => setTimeout(resolve, 550))
+    session.emit('audio', mirroredRtpFrame(2_000))
+    await waitUntil(() => device.playbackChunks.length >= 13)
+    session.emit('audioEnd', turn)
 
     expect(errors).toEqual([])
     expect(device.playbackChunks).toHaveLength(13)
@@ -209,6 +211,49 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     controller.abort(new Error('late RTP test finished'))
     device.playbackDrained.resolve()
     await expect(running).rejects.toThrow('late RTP test finished')
+  })
+
+  it('does not time out long playout after the RTP boundary is declared', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+
+    try {
+      for (let index = 0; index < 12; index += 1) {
+        session.emit('audio', mirroredRtpFrame(2_000))
+      }
+      emitAssistantTranscriptDone(appServer)
+      const turn = {
+        id: 'turn-long',
+        startMilliseconds: 0,
+        endMilliseconds: 12_000,
+        transcript: 'long response',
+      }
+      session.emit('audioEndDeclared', turn)
+
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(errors).toEqual([])
+
+      session.emit('audioEnd', turn)
+      controller.abort(new Error('long playout test finished'))
+      device.playbackDrained.resolve()
+      await expect(running).rejects.toThrow('long playout test finished')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('fails instead of waiting forever when v3 omits the output media boundary', async () => {
@@ -237,12 +282,12 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
       expect(errors).toEqual([])
       await vi.advanceTimersByTimeAsync(1)
       expect(errors).toEqual([
-        '音声ブリッジエラー: Codex v3 completed the assistant transcript without reaching its declared RTP media boundary',
+        '音声ブリッジエラー: Codex v3 completed the assistant transcript without declaring its RTP media boundary',
       ])
 
       device.playbackDrained.resolve()
       await expect(running).rejects.toThrow(
-        'without reaching its declared RTP media boundary',
+        'without declaring its RTP media boundary',
       )
     } finally {
       vi.useRealTimers()

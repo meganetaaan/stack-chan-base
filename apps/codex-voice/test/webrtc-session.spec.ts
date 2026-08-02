@@ -218,7 +218,9 @@ describe('RealtimeWebRtcSession transport liveness', () => {
 
     try {
       await session.start()
+      const audioEndDeclared = vi.fn()
       const audioEnd = vi.fn()
+      session.on('audioEndDeclared', audioEndDeclared)
       session.on('audioEnd', audioEnd)
       mockWebRtc.peer!.dataChannel.emitMessage({
         type: 'turn.created',
@@ -241,6 +243,14 @@ describe('RealtimeWebRtcSession transport liveness', () => {
           transcript: 'テストです',
         },
       })
+      expect(audioEndDeclared).toHaveBeenCalledOnce()
+      expect(audioEndDeclared).toHaveBeenCalledWith({
+        id: 'assistant-1',
+        startMilliseconds: 0,
+        endMilliseconds: 40,
+        transcript: 'テストです',
+      })
+      expect(audioEnd).not.toHaveBeenCalled()
       mockWebRtc.remoteTrack!.emitRtp(encoded)
       mockWebRtc.remoteTrack!.emitRtp(encoded)
 
@@ -255,6 +265,103 @@ describe('RealtimeWebRtcSession transport liveness', () => {
         transcript: 'テストです',
       })
       encoder.free()
+    } finally {
+      await session.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a declared boundary alive while the RTP media clock advances', async () => {
+    vi.useFakeTimers()
+    const appServer = {
+      startRealtime: vi.fn(async () => 'v=0\r\n'),
+      stopRealtime: vi.fn(async () => undefined),
+    } as unknown as CodexAppServer
+    const session = new RealtimeWebRtcSession(appServer)
+    sessions.push(session)
+    let encoder: Awaited<ReturnType<typeof createWebRtcOpusEncoder>> | undefined
+
+    try {
+      await session.start()
+      const audioEnd = vi.fn()
+      session.on('audioEnd', audioEnd)
+      let closed: Error | undefined | 'pending' = 'pending'
+      void session.closed.then((error) => {
+        closed = error
+      })
+      mockWebRtc.peer!.dataChannel.emitMessage({
+        type: 'turn.created',
+        turn: { id: 'assistant-long', role: 'assistant', start_ms: 0 },
+      })
+      mockWebRtc.peer!.dataChannel.emitMessage({
+        type: 'turn.done',
+        turn: {
+          id: 'assistant-long',
+          role: 'assistant',
+          start_ms: 0,
+          end_ms: 6_000,
+          transcript: '長い応答です',
+        },
+      })
+
+      encoder = await createWebRtcOpusEncoder()
+      const encoded = Buffer.from(encoder.encode(
+        Int16Array.from({ length: 960 }, (_, index) =>
+          Math.round(Math.sin(index / 8) * 4_000),
+        ),
+      ))
+      for (let index = 0; index < 300; index += 1) {
+        mockWebRtc.remoteTrack!.emitRtp(encoded)
+      }
+
+      await vi.advanceTimersByTimeAsync(6_200)
+      expect(audioEnd).toHaveBeenCalledOnce()
+      expect(closed).toBe('pending')
+    } finally {
+      encoder?.free()
+      await session.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('fails when a declared boundary receives no RTP media progress', async () => {
+    vi.useFakeTimers()
+    const appServer = {
+      startRealtime: vi.fn(async () => 'v=0\r\n'),
+      stopRealtime: vi.fn(async () => undefined),
+    } as unknown as CodexAppServer
+    const session = new RealtimeWebRtcSession(appServer)
+    sessions.push(session)
+
+    try {
+      await session.start()
+      mockWebRtc.peer!.dataChannel.emitMessage({
+        type: 'turn.created',
+        turn: { id: 'assistant-stalled', role: 'assistant', start_ms: 0 },
+      })
+      mockWebRtc.peer!.dataChannel.emitMessage({
+        type: 'turn.done',
+        turn: {
+          id: 'assistant-stalled',
+          role: 'assistant',
+          start_ms: 0,
+          end_ms: 40,
+          transcript: 'stalled',
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      let settled = false
+      void session.closed.then(() => {
+        settled = true
+      })
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(session.closed).resolves.toMatchObject({
+        message: 'WebRTC assistant RTP media clock stalled before turn=assistant-stalled end_ms=40',
+      })
     } finally {
       await session.close()
       vi.useRealTimers()

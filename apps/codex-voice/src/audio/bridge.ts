@@ -79,6 +79,7 @@ export class RealtimeAudioBridge {
   #playbackQueuedBytes = 0
   #playbackClosing = false
   #assistantTranscriptCompleted = false
+  #assistantAudioBoundaryDeclared = false
   #outputLifecycleWatchdog: NodeJS.Timeout | undefined
   #terminalError: Error | undefined
 
@@ -111,9 +112,12 @@ export class RealtimeAudioBridge {
     this.#session = session
     const onNotification = (notification: RpcNotification) => this.#handleNotification(notification)
     const onSessionAudio = (chunk: PcmChunk) => this.#handleOutputAudio(chunk)
+    const onSessionAudioEndDeclared = (turn: RealtimeAudioTurnEnd) =>
+      this.#handleOutputAudioEndDeclared(turn)
     const onSessionAudioEnd = (turn: RealtimeAudioTurnEnd) => this.#handleOutputAudioEnd(turn)
     this.#appServer.on('notification', onNotification)
     session.on('audio', onSessionAudio)
+    session.on('audioEndDeclared', onSessionAudioEndDeclared)
     session.on('audioEnd', onSessionAudioEnd)
     const abortDeferred = new Deferred<never>()
     const onAbort = () => abortDeferred.reject(signal.reason ?? abortError())
@@ -144,6 +148,7 @@ export class RealtimeAudioBridge {
       this.#running = false
       this.#appServer.off('notification', onNotification)
       session.off('audio', onSessionAudio)
+      session.off('audioEndDeclared', onSessionAudioEndDeclared)
       session.off('audioEnd', onSessionAudioEnd)
       signal.removeEventListener('abort', onAbort)
       this.#micController?.abort(abortError('audio bridge stopped'))
@@ -343,6 +348,7 @@ export class RealtimeAudioBridge {
         this.#playbackTask = undefined
         this.#playbackClosing = false
         this.#assistantTranscriptCompleted = false
+        this.#assistantAudioBoundaryDeclared = false
         this.#sourceQueuedBytes = 0
         this.#playbackQueuedBytes = 0
         this.#clearOutputLifecycleWatchdog()
@@ -411,6 +417,7 @@ export class RealtimeAudioBridge {
     const role = typeof params.role === 'string' ? params.role : ''
     if (role === 'user') {
       this.#assistantTranscriptCompleted = false
+      this.#assistantAudioBoundaryDeclared = false
       void this.#setState('recognizing')
       return
     }
@@ -420,7 +427,13 @@ export class RealtimeAudioBridge {
     }
   }
 
+  #handleOutputAudioEndDeclared(_turn: RealtimeAudioTurnEnd): void {
+    this.#assistantAudioBoundaryDeclared = true
+    this.#clearOutputLifecycleWatchdog()
+  }
+
   #handleOutputAudioEnd(_turn: RealtimeAudioTurnEnd): void {
+    this.#assistantAudioBoundaryDeclared = true
     this.#clearOutputLifecycleWatchdog()
     if (!this.#playbackSourceQueue || this.#playbackClosing) return
     this.#playbackClosing = true
@@ -453,6 +466,7 @@ export class RealtimeAudioBridge {
   #scheduleOutputLifecycleWatchdog(): void {
     if (
       !this.#assistantTranscriptCompleted ||
+      this.#assistantAudioBoundaryDeclared ||
       !this.#playbackSourceQueue ||
       this.#playbackClosing
     ) return
@@ -462,7 +476,7 @@ export class RealtimeAudioBridge {
       if (!this.#playbackSourceQueue || this.#playbackClosing) return
       this.#fail(
         new Error(
-          'Codex v3 completed the assistant transcript without reaching its declared RTP media boundary',
+          'Codex v3 completed the assistant transcript without declaring its RTP media boundary',
         ),
       )
     }, OUTPUT_AUDIO_LIFECYCLE_WATCHDOG_MS)

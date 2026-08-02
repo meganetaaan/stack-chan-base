@@ -50,8 +50,10 @@ jitter bufferの再生位置が変換後の終端へ達した時だけ出力queu
 SSRC変更などで同じメディア時計を維持できない場合は終端を推測せずtransport errorにします。
 
 これは公開Realtime APIと同じイベント契約ではなく、CodexのFrameless Bidi v3に対するadapterです。
-assistant transcript完了後も5秒以内に`turn.done`と対応するRTP境界が成立しない場合は、正常終了として音声を切らず、protocol liveness errorとしてセッションを再接続します。
-この監視時間は音声終端を推定するgrace periodではなく、不完全なv3ライフサイクルを無期限待機しないための障害境界です。
+assistant transcript完了後も5秒以内に`turn.done`が宣言されない場合は、正常終了として音声を切らず、protocol liveness errorとしてセッションを再接続します。
+`turn.done`宣言後の境界到達はWebRTC sessionが所有し、RTP media clockが進むたびにstall監視を更新します。
+実RTPメディア時刻が5秒停止した場合だけ到達不能として失敗し、ローカル再buffer用の無音では監視を更新しません。
+これらの監視時間は音声終端を推定するgrace periodではなく、不完全なv3ライフサイクルを無期限待機しないための障害境界です。
 
 remote RTPは120msのjitter bufferでtimestamp順に再生します。
 sequence numberが連続したtimestamp gapはOpus DTXとして無音を出し、decoder状態は進めません。
