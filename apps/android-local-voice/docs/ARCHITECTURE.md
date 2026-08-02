@@ -73,6 +73,7 @@ AndroidはLLM応答の開始時にtool catalogをsnapshotし、Firmware向けfun
 旧応答がprovider更新後にtool callを生成しても旧IDのままなので、Firmwareは新providerで同名toolを誤実行しません。
 各provider世代は保留function、送信中function、承認待ち・通信中MCP、`session.updated`再送Jobを所有します。
 世代遷移はfunction call eventの送信と直列化し、旧世代のMCP Jobをcancelしてから新世代をackします。ack書き込み失敗時は同じ世代を再適用せず再送します。
+使用済み`session.update.event_id`はUSB transport session中保持し、現在世代の同一payloadだけを再ackします。終了済みIDの遅延再送は旧providerを復元せず拒否します。
 制御イベントはUSBのEVENTフレームでUTF-8 JSONとして送りますが、マイクとスピーカーのPCMは既存のバイナリフレームを維持します。
 `stackchan.event.v1`の`conversation.start`は自動会話を開始し、`conversation.stop`は現在の会話を停止します。
 同じ`requestId`の再送には直近64件から同一の`conversation.result`を返し、操作を重複実行しません。

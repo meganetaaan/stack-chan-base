@@ -95,6 +95,7 @@ class RealtimeSessionController(
     private val pendingFunctionsLock = Any()
     private val providerTransitionMutex = Mutex()
     private val pendingFunctions = mutableMapOf<String, PendingFunction>()
+    private val providerUpdateHistory = mutableMapOf<String, JsonObject>()
     private val conversationResults = LinkedHashMap<String, CachedConversationResult>()
     private var remoteFunctionsAvailable = false
     private var providerGeneration: ProviderGenerationLease? = null
@@ -237,14 +238,21 @@ class RealtimeSessionController(
         try {
             val nextProviderGeneration = requireNotNull(eventId) { "session.updateにはevent_idが必要です" }
             val session = root["session"]?.jsonObject ?: error("sessionがありません")
-            val duplicate = synchronized(pendingFunctionsLock) {
-                providerGeneration?.takeIf { it.id == nextProviderGeneration }
+            val knownSession = synchronized(pendingFunctionsLock) {
+                providerUpdateHistory[nextProviderGeneration]
             }
-            if (duplicate != null) {
-                require(duplicate.session == session) {
+            if (knownSession != null) {
+                require(knownSession == session) {
                     "同じevent_idを異なるsession.updateに再利用できません"
                 }
-                announceProviderGeneration(duplicate)
+                val current = synchronized(pendingFunctionsLock) {
+                    providerGeneration?.takeIf { it.id == nextProviderGeneration }
+                }
+                if (current != null) {
+                    announceProviderGeneration(current)
+                } else {
+                    sendError(eventId, "stale_event_id", "provider世代はすでに終了しました")
+                }
                 return
             }
             val nextInstructions = if ("instructions" in session) {
@@ -274,6 +282,7 @@ class RealtimeSessionController(
                     )
                     retireProviderGenerationLocked().also {
                         providerGeneration = nextLease
+                        providerUpdateHistory[nextProviderGeneration] = session
                     }
                 }
                 cancelRetiredProviderWork(retired, "ツール設定が更新されました")
@@ -595,6 +604,7 @@ class RealtimeSessionController(
                 controllerClosed = true
                 conversationResults.clear()
             }
+            providerUpdateHistory.clear()
             instructionOverlay = ""
             remoteDefinitions = emptyList()
             registry.clearRemoteTools()

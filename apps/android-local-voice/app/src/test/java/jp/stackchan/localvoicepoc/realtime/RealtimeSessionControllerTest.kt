@@ -288,6 +288,61 @@ class RealtimeSessionControllerTest {
     }
 
     @Test
+    fun retriesTheCurrentUpdateIdempotentlyAndRejectsARetiredUpdateId() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val providerAExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        assertTrue(providerAExecutor === registry.functionExecutor)
+
+        transport.receive(remoteToolUpdate("provider-b"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        val providerBExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "error" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+
+        assertTrue(providerBExecutor === registry.functionExecutor)
+        assertTrue(
+            transport.payloads().none {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            },
+        )
+        controller.close()
+    }
+
+    @Test
     fun serializesAProviderUpdateAfterAnAlreadyStartedFunctionEmission() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL)
         val registry = FakeRegistry()
