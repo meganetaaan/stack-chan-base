@@ -84,11 +84,12 @@ vi.mock('werift', () => {
         payload,
       })
       this.#sequenceNumber = (this.#sequenceNumber + 1) & 0xffff
-      this.#timestamp = (this.#timestamp + 960) >>> 0
+      this.#timestamp = (this.#timestamp + WEBRTC_AUDIO_FRAME_SAMPLES) >>> 0
     }
 
     skipSequence(packets: number): void {
       this.#sequenceNumber = (this.#sequenceNumber + packets) & 0xffff
+      this.#timestamp = (this.#timestamp + packets * WEBRTC_AUDIO_FRAME_SAMPLES) >>> 0
     }
   }
 
@@ -168,6 +169,7 @@ import {
   REMOTE_AUDIO_PLAYOUT_DELAY_MS,
   REMOTE_AUDIO_WARNING_INTERVAL_MS,
   WEBRTC_AUDIO_FRAME_MILLISECONDS,
+  WEBRTC_AUDIO_FRAME_SAMPLES,
 } from '../src/audio/webrtc.js'
 import type { CodexAppServer } from '../src/codex/app-server.js'
 
@@ -251,7 +253,7 @@ describe('RealtimeWebRtcSession transport liveness', () => {
 
       expect(warn).toHaveBeenCalledOnce()
       expect(warn).toHaveBeenCalledWith(
-        'WebRTC remote audio diagnostics: 10 lost packet(s)',
+        'WebRTC remote audio diagnostics: 10 lost packet(s); repairs fec=10 plc=0',
       )
     } finally {
       encoder?.free()
