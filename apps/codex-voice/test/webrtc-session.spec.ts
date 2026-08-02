@@ -15,6 +15,7 @@ const mockWebRtc = vi.hoisted(() => ({
   remoteTrack: undefined as
     | {
         emitRtp(payload: Buffer): void
+        skipSequence(packets: number): void
       }
     | undefined,
 }))
@@ -84,6 +85,10 @@ vi.mock('werift', () => {
       })
       this.#sequenceNumber = (this.#sequenceNumber + 1) & 0xffff
       this.#timestamp = (this.#timestamp + 960) >>> 0
+    }
+
+    skipSequence(packets: number): void {
+      this.#sequenceNumber = (this.#sequenceNumber + packets) & 0xffff
     }
   }
 
@@ -160,6 +165,9 @@ vi.mock('werift', () => {
 import {
   RealtimeWebRtcSession,
   createWebRtcOpusEncoder,
+  REMOTE_AUDIO_PLAYOUT_DELAY_MS,
+  REMOTE_AUDIO_WARNING_INTERVAL_MS,
+  WEBRTC_AUDIO_FRAME_MILLISECONDS,
 } from '../src/audio/webrtc.js'
 import type { CodexAppServer } from '../src/codex/app-server.js'
 
@@ -192,19 +200,65 @@ describe('RealtimeWebRtcSession transport liveness', () => {
       prompt: '日本語で話してください。',
     })
     const encoder = await createWebRtcOpusEncoder()
-    const samples = Int16Array.from({ length: 960 }, (_, index) =>
-      Math.round(Math.sin(index / 8) * 4_000),
-    )
+    try {
+      const samples = Int16Array.from({ length: 960 }, (_, index) =>
+        Math.round(Math.sin(index / 8) * 4_000),
+      )
 
-    mockWebRtc.remoteTrack!.emitRtp(
-      Buffer.from(encoder.encode(samples)),
-    )
+      mockWebRtc.remoteTrack!.emitRtp(
+        Buffer.from(encoder.encode(samples)),
+      )
 
-    const chunk = await received
-    expect(chunk.sampleRate).toBe(48_000)
-    expect(chunk.channels).toBe(1)
-    expect(Math.max(...decodePcm16Le(chunk.data).map(Math.abs))).toBeGreaterThan(100)
-    encoder.free()
+      const chunk = await received
+      expect(chunk.sampleRate).toBe(48_000)
+      expect(chunk.channels).toBe(1)
+      expect(Math.max(...decodePcm16Le(chunk.data).map(Math.abs))).toBeGreaterThan(100)
+    } finally {
+      encoder.free()
+    }
+  })
+
+  it('aggregates sustained packet-loss diagnostics into one warning per interval', async () => {
+    vi.useFakeTimers()
+    const appServer = {
+      startRealtime: vi.fn(async () => 'v=0\r\n'),
+      stopRealtime: vi.fn(async () => undefined),
+    } as unknown as CodexAppServer
+    const session = new RealtimeWebRtcSession(appServer)
+    sessions.push(session)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let encoder: Awaited<ReturnType<typeof createWebRtcOpusEncoder>> | undefined
+
+    try {
+      await session.start()
+      encoder = await createWebRtcOpusEncoder()
+      const encoded = Buffer.from(encoder.encode(
+        Int16Array.from({ length: 960 }, (_, index) =>
+          Math.round(Math.sin(index / 8) * 4_000),
+        ),
+      ))
+      mockWebRtc.remoteTrack!.emitRtp(encoded)
+      for (let index = 0; index < 10; index += 1) {
+        mockWebRtc.remoteTrack!.skipSequence(1)
+        mockWebRtc.remoteTrack!.emitRtp(encoded)
+      }
+
+      await vi.advanceTimersByTimeAsync(
+        REMOTE_AUDIO_PLAYOUT_DELAY_MS + WEBRTC_AUDIO_FRAME_MILLISECONDS * 10,
+      )
+      expect(warn).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(REMOTE_AUDIO_WARNING_INTERVAL_MS)
+
+      expect(warn).toHaveBeenCalledOnce()
+      expect(warn).toHaveBeenCalledWith(
+        'WebRTC remote audio diagnostics: 10 lost packet(s)',
+      )
+    } finally {
+      encoder?.free()
+      await session.close()
+      warn.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it('emits audioEnd only after RTP playout reaches turn.done end_ms', async () => {
@@ -215,6 +269,7 @@ describe('RealtimeWebRtcSession transport liveness', () => {
     } as unknown as CodexAppServer
     const session = new RealtimeWebRtcSession(appServer)
     sessions.push(session)
+    let encoder: Awaited<ReturnType<typeof createWebRtcOpusEncoder>> | undefined
 
     try {
       await session.start()
@@ -227,7 +282,7 @@ describe('RealtimeWebRtcSession transport liveness', () => {
         turn: { id: 'assistant-1', role: 'assistant', start_ms: 0 },
       })
 
-      const encoder = await createWebRtcOpusEncoder()
+      encoder = await createWebRtcOpusEncoder()
       const encoded = Buffer.from(encoder.encode(
         Int16Array.from({ length: 960 }, (_, index) =>
           Math.round(Math.sin(index / 8) * 4_000),
@@ -254,7 +309,9 @@ describe('RealtimeWebRtcSession transport liveness', () => {
       mockWebRtc.remoteTrack!.emitRtp(encoded)
       mockWebRtc.remoteTrack!.emitRtp(encoded)
 
-      await vi.advanceTimersByTimeAsync(139)
+      await vi.advanceTimersByTimeAsync(
+        REMOTE_AUDIO_PLAYOUT_DELAY_MS + WEBRTC_AUDIO_FRAME_MILLISECONDS - 1,
+      )
       expect(audioEnd).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
       expect(audioEnd).toHaveBeenCalledOnce()
@@ -264,8 +321,8 @@ describe('RealtimeWebRtcSession transport liveness', () => {
         endMilliseconds: 40,
         transcript: 'テストです',
       })
-      encoder.free()
     } finally {
+      encoder?.free()
       await session.close()
       vi.useRealTimers()
     }

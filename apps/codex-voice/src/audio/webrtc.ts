@@ -30,8 +30,9 @@ const WEBRTC_OPUS_BITRATE = 32_000
 const RTP_PAYLOAD_TYPE_FALLBACK = 111
 const RTP_TALKSPURT_GAP_MS = WEBRTC_AUDIO_FRAME_MILLISECONDS * 3
 const MAX_QUEUED_MICROPHONE_FRAMES = 10
-const REMOTE_AUDIO_PLAYOUT_DELAY_MS = 120
+export const REMOTE_AUDIO_PLAYOUT_DELAY_MS = 120
 const REMOTE_AUDIO_IDLE_TIMEOUT_MS = 2_000
+export const REMOTE_AUDIO_WARNING_INTERVAL_MS = 1_000
 const MAX_CONSECUTIVE_REMOTE_DECODE_FAILURES = 5
 const MAX_REMOTE_TIMESTAMP_GAP_SAMPLES =
   (WEBRTC_AUDIO_SAMPLE_RATE * REMOTE_AUDIO_IDLE_TIMEOUT_MS) / 1_000
@@ -1041,6 +1042,12 @@ export class RealtimeWebRtcSession
   #pendingAudioBoundary: RealtimeAudioTurnEnd | undefined
   #audioBoundaryStallTimer: NodeJS.Timeout | undefined
   #peerDisconnectedTimer: NodeJS.Timeout | undefined
+  #remoteAudioWarningTimer: NodeJS.Timeout | undefined
+  #remoteAudioDecodeFailures = 0
+  #remoteAudioFirstDecodeFailure: string | undefined
+  #remoteAudioLostPackets = 0
+  #remoteAudioFecRepairs = 0
+  #remoteAudioPlcRepairs = 0
   #starting = false
   #started = false
   #closing = false
@@ -1183,6 +1190,7 @@ export class RealtimeWebRtcSession
     this.#sender?.stop()
     this.#audioBoundary.reset()
     for (const unsubscribe of this.#subscriptions.splice(0)) unsubscribe()
+    this.#flushRemoteAudioWarnings()
     this.#opusEncoder?.free()
     this.#opusEncoder = undefined
     this.#opusDecoder?.close()
@@ -1228,13 +1236,11 @@ export class RealtimeWebRtcSession
         ? { payloadType: track.codec.payloadType }
         : {}),
       onError: (error) => this.#fail(remoteAudioProcessingError(error)),
-      onDecodeError: (error, packet) => console.warn(
-        `WebRTC remote Opus packet concealed: sequence=${packet.header.sequenceNumber} payloadType=${packet.header.payloadType} bytes=${packet.payload.byteLength} reason=${error.message}`,
+      onDecodeError: (error, packet) => this.#recordRemoteAudioDecodeFailure(
+        `sequence=${packet.header.sequenceNumber} payloadType=${packet.header.payloadType} bytes=${packet.payload.byteLength} reason=${error.message}`,
       ),
-      onPacketLoss: (packets) => console.warn(`WebRTC remote audio packet loss: ${packets} packet(s)`),
-      onPacketRepair: (method) => console.warn(
-        `WebRTC remote audio repaired with Opus ${method.toUpperCase()}`,
-      ),
+      onPacketLoss: (packets) => this.#recordRemoteAudioPacketLoss(packets),
+      onPacketRepair: (method) => this.#recordRemoteAudioRepair(method),
     })
     this.#subscribe(track.onReceiveRtp, (packet) => {
       try {
@@ -1368,6 +1374,61 @@ export class RealtimeWebRtcSession
     if (!this.#audioBoundaryStallTimer) return
     clearTimeout(this.#audioBoundaryStallTimer)
     this.#audioBoundaryStallTimer = undefined
+  }
+
+  #recordRemoteAudioDecodeFailure(details: string): void {
+    this.#remoteAudioDecodeFailures += 1
+    this.#remoteAudioFirstDecodeFailure ??= details
+    this.#scheduleRemoteAudioWarning()
+  }
+
+  #recordRemoteAudioPacketLoss(packets: number): void {
+    this.#remoteAudioLostPackets += packets
+    this.#scheduleRemoteAudioWarning()
+  }
+
+  #recordRemoteAudioRepair(method: 'fec' | 'plc'): void {
+    if (method === 'fec') this.#remoteAudioFecRepairs += 1
+    else this.#remoteAudioPlcRepairs += 1
+    this.#scheduleRemoteAudioWarning()
+  }
+
+  #scheduleRemoteAudioWarning(): void {
+    if (this.#remoteAudioWarningTimer) return
+    this.#remoteAudioWarningTimer = setTimeout(() => {
+      this.#remoteAudioWarningTimer = undefined
+      this.#flushRemoteAudioWarnings()
+    }, REMOTE_AUDIO_WARNING_INTERVAL_MS)
+    this.#remoteAudioWarningTimer.unref()
+  }
+
+  #flushRemoteAudioWarnings(): void {
+    if (this.#remoteAudioWarningTimer) {
+      clearTimeout(this.#remoteAudioWarningTimer)
+      this.#remoteAudioWarningTimer = undefined
+    }
+    const summaries: string[] = []
+    if (this.#remoteAudioDecodeFailures > 0) {
+      summaries.push(
+        `${this.#remoteAudioDecodeFailures} decode failure(s); first ${this.#remoteAudioFirstDecodeFailure ?? 'unknown'}`,
+      )
+    }
+    if (this.#remoteAudioLostPackets > 0) {
+      summaries.push(`${this.#remoteAudioLostPackets} lost packet(s)`)
+    }
+    if (this.#remoteAudioFecRepairs > 0 || this.#remoteAudioPlcRepairs > 0) {
+      summaries.push(
+        `repairs fec=${this.#remoteAudioFecRepairs} plc=${this.#remoteAudioPlcRepairs}`,
+      )
+    }
+    this.#remoteAudioDecodeFailures = 0
+    this.#remoteAudioFirstDecodeFailure = undefined
+    this.#remoteAudioLostPackets = 0
+    this.#remoteAudioFecRepairs = 0
+    this.#remoteAudioPlcRepairs = 0
+    if (summaries.length > 0) {
+      console.warn(`WebRTC remote audio diagnostics: ${summaries.join('; ')}`)
+    }
   }
 
   #fail(error: unknown): void {

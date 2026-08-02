@@ -27,26 +27,29 @@ describe('OpusRtpAudioSender pacing', () => {
         packets.push(packet)
       },
     }, { encoder })
+    let decoder: OpusRtpAudioDecoder | undefined
+    try {
+      sender.start()
+      vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 3)
 
-    sender.start()
-    vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 3)
+      expect(packets).toHaveLength(3)
+      for (let index = 1; index < packets.length; index += 1) {
+        expect(
+          ((packets[index]!.header.timestamp - packets[index - 1]!.header.timestamp) >>> 0),
+        ).toBe(WEBRTC_AUDIO_FRAME_SAMPLES)
+      }
 
-    expect(packets).toHaveLength(3)
-    for (let index = 1; index < packets.length; index += 1) {
-      expect(
-        ((packets[index]!.header.timestamp - packets[index - 1]!.header.timestamp) >>> 0),
-      ).toBe(WEBRTC_AUDIO_FRAME_SAMPLES)
+      decoder = await OpusRtpAudioDecoder.create()
+      for (const packet of packets) {
+        const decoded = decodePcm16Le(decoder.decode(packet).data)
+        expect(Math.max(...decoded.map(Math.abs))).toBe(0)
+      }
+    } finally {
+      sender.stop()
+      decoder?.close()
+      encoder.free()
     }
 
-    const decoder = await OpusRtpAudioDecoder.create()
-    for (const packet of packets) {
-      const decoded = decodePcm16Le(decoder.decode(packet).data)
-      expect(Math.max(...decoded.map(Math.abs))).toBe(0)
-    }
-
-    sender.stop()
-    decoder.close()
-    encoder.free()
     vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 2)
     expect(packets).toHaveLength(3)
   })
@@ -69,23 +72,27 @@ describe('OpusRtpAudioSender pacing', () => {
       48_000,
     )
 
-    sender.start()
-    sender.push(microphoneFrame)
-    vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 6)
+    let decoder: OpusRtpAudioDecoder | undefined
+    try {
+      sender.start()
+      sender.push(microphoneFrame)
+      vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 6)
 
-    expect(packets).toHaveLength(6)
-    const decoder = await OpusRtpAudioDecoder.create()
-    const microphoneOutput = decodePcm16Le(decoder.decode(packets[0]!).data)
-    const silenceOutputs = packets
-      .slice(1)
-      .map((packet) => decodePcm16Le(decoder.decode(packet).data))
-    const silenceOutput = silenceOutputs.at(-1)!
-    expect(Math.max(...microphoneOutput.map(Math.abs))).toBeGreaterThan(100)
-    expect(Math.max(...silenceOutput.map(Math.abs))).toBeLessThan(100)
-
-    sender.stop()
-    decoder.close()
-    encoder.free()
+      expect(packets).toHaveLength(6)
+      decoder = await OpusRtpAudioDecoder.create()
+      const activeDecoder = decoder
+      const microphoneOutput = decodePcm16Le(activeDecoder.decode(packets[0]!).data)
+      const silenceOutputs = packets
+        .slice(1)
+        .map((packet) => decodePcm16Le(activeDecoder.decode(packet).data))
+      const silenceOutput = silenceOutputs.at(-1)!
+      expect(Math.max(...microphoneOutput.map(Math.abs))).toBeGreaterThan(100)
+      expect(Math.max(...silenceOutput.map(Math.abs))).toBeLessThan(100)
+    } finally {
+      sender.stop()
+      decoder?.close()
+      encoder.free()
+    }
   })
 
   it('continues silence pacing while microphone state is reset', async () => {
@@ -98,12 +105,15 @@ describe('OpusRtpAudioSender pacing', () => {
       },
     }, { encoder })
 
-    sender.start()
-    sender.reset()
-    vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 2)
+    try {
+      sender.start()
+      sender.reset()
+      vi.advanceTimersByTime(WEBRTC_AUDIO_FRAME_MILLISECONDS * 2)
 
-    expect(packets).toHaveLength(2)
-    sender.stop()
-    encoder.free()
+      expect(packets).toHaveLength(2)
+    } finally {
+      sender.stop()
+      encoder.free()
+    }
   })
 })
