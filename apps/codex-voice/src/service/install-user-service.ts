@@ -41,13 +41,9 @@ async function main(): Promise<void> {
     return
   }
 
-  const workspace = await loadActiveWorkspace()
-  await assertVoiceEffectAvailable(workspace.session.voiceEffect)
-  const portPath = parsed.values.port ?? '/dev/ttyACM0'
   const unitName = validateSystemdUnitName(
     parsed.values['unit-name'] ?? DEFAULT_UNIT_NAME,
   )
-  const deviceId = await discoverStackChanDeviceId(portPath)
   const selectionPath = deviceSelectionPath()
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url))
   await access(cliPath, constants.R_OK)
@@ -64,6 +60,11 @@ async function main(): Promise<void> {
     process.stdout.write(unit)
     return
   }
+
+  const workspace = await loadActiveWorkspace()
+  await assertVoiceEffectAvailable(workspace.session.voiceEffect)
+  const portPath = parsed.values.port ?? '/dev/ttyACM0'
+  const deviceId = await discoverStackChanDeviceId(portPath)
 
   const configHome =
     process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.length > 0

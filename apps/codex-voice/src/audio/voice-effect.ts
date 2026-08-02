@@ -22,6 +22,7 @@ export type PcmAudioTransform = (
 
 export type VoiceEffectRuntimeOptions = {
   ffmpegBinary?: string
+  probeTimeoutMilliseconds?: number
 }
 
 export const VOICE_EFFECT_SAMPLE_RATE = 48_000
@@ -31,6 +32,7 @@ export const CUTE_PITCH_RATIO = 1.189207115
 const DEFAULT_FFMPEG_BINARY = 'ffmpeg'
 const MAX_FFMPEG_STDERR_CHARACTERS = 65_536
 const FFMPEG_TERMINATE_TIMEOUT_MS = 1_000
+const VOICE_EFFECT_PROBE_TIMEOUT_MS = 10_000
 const CUTE_FILTER = [
   `pitch=${CUTE_PITCH_RATIO}`,
   'tempo=1',
@@ -107,6 +109,20 @@ export async function assertVoiceEffectAvailable(
 ): Promise<void> {
   if (voiceEffect === undefined) return
   const controller = new AbortController()
+  const timeoutMilliseconds = runtimeOptions.probeTimeoutMilliseconds ??
+    VOICE_EFFECT_PROBE_TIMEOUT_MS
+  if (!Number.isFinite(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
+    throw new RangeError('voice effect probe timeout must be a positive number')
+  }
+  const timeout = setTimeout(() => {
+    controller.abort(
+      new NonRetryableError(
+        'configuration',
+        `FFmpeg rubberbandの事前検査が${timeoutMilliseconds} msでタイムアウトしました`,
+      ),
+    )
+  }, timeoutMilliseconds)
+  timeout.unref()
   let outputBytes = 0
   async function* probe(): AsyncGenerator<PcmChunk> {
     yield pcmChunk(
@@ -114,14 +130,18 @@ export async function assertVoiceEffectAvailable(
       VOICE_EFFECT_SAMPLE_RATE,
     )
   }
-  for await (const chunk of createVoiceOutputTransform(
-    voiceEffect,
-    runtimeOptions,
-  )(
-    probe(),
-    controller.signal,
-  )) {
-    outputBytes += chunk.data.byteLength
+  try {
+    for await (const chunk of createVoiceOutputTransform(
+      voiceEffect,
+      runtimeOptions,
+    )(
+      probe(),
+      controller.signal,
+    )) {
+      outputBytes += chunk.data.byteLength
+    }
+  } finally {
+    clearTimeout(timeout)
   }
   if (outputBytes === 0) {
     throw new NonRetryableError(
@@ -374,7 +394,10 @@ function ffmpegExitError(
 function ffmpegFailureMessage(error: unknown, stderr: string): string {
   const message = error instanceof Error ? error.message : String(error)
   const details = stderr.trim()
-  if (message.includes('ENOENT')) {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? error.code
+    : undefined
+  if (code === 'ENOENT' || message.includes('ENOENT')) {
     return 'かわいい声加工にはFFmpegとrubberbandフィルタが必要です'
   }
   return `かわいい声加工に失敗しました: ${message}${details && !message.includes(details) ? `: ${details}` : ''}`

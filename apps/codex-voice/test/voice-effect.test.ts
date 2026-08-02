@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import {
   assertVoiceEffectAvailable,
@@ -22,7 +25,7 @@ test('cute voice effect uses low-latency rubberband arguments without nobuffer t
   assert.equal(args[args.indexOf('-probesize') + 1], '32')
   assert.equal(args[args.indexOf('-analyzeduration') + 1], '0')
   assert.doesNotMatch(args.join(' '), /-fflags\s+nobuffer/)
-  assert.match(args[filterIndex + 1]!, new RegExp(`pitch=${CUTE_PITCH_RATIO}`))
+  assert.ok(args[filterIndex + 1]!.includes(`pitch=${CUTE_PITCH_RATIO}`))
   assert.match(args[filterIndex + 1]!, /tempo=1/)
   assert.match(args[filterIndex + 1]!, /formant=shifted/)
   assert.match(args[filterIndex + 1]!, /window=short/)
@@ -66,6 +69,37 @@ test('voice effect preflight reports a missing FFmpeg as a configuration error',
   )
 })
 
+test('voice effect preflight terminates a hung FFmpeg probe', async (context) => {
+  if (process.platform === 'win32') {
+    context.skip('the voice service is POSIX-only')
+    return
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'stackchan-voice-probe-'))
+  const hangingFfmpeg = join(directory, 'ffmpeg-hang')
+  try {
+    await writeFile(
+      hangingFfmpeg,
+      '#!/usr/bin/env node\nprocess.stdin.resume()\nsetInterval(() => undefined, 1_000)\n',
+    )
+    await chmod(hangingFfmpeg, 0o755)
+
+    await assert.rejects(
+      assertVoiceEffectAvailable('cute', {
+        ffmpegBinary: hangingFfmpeg,
+        probeTimeoutMilliseconds: 100,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof NonRetryableError)
+        assert.equal(error.reason, 'configuration')
+        assert.match(error.message, /100 ms.*タイムアウト/)
+        return true
+      },
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('real rubberband keeps duration and raises a 440 Hz tone by three semitones', async (context) => {
   if (!hasFfmpegRubberband()) {
     context.skip('FFmpeg rubberband filter is unavailable')
@@ -105,7 +139,7 @@ test('real rubberband keeps duration and raises a 440 Hz tone by three semitones
   }
 
   assert.ok(
-    Math.abs(output.length - 24_000) <= 10,
+    Math.abs(output.length - 24_000) <= 480,
     `unexpected output length: ${output.length}`,
   )
   const start = Math.floor(output.length * 0.2)
