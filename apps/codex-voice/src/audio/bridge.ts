@@ -241,7 +241,7 @@ export class RealtimeAudioBridge {
     try {
       this.#validateOutputAudio(chunk)
       const audible = isAudiblePcm16(chunk.data)
-      if (!audible && !this.#playbackQueue) return
+      if (!audible && !this.#playbackSourceQueue) return
       if (this.#playbackClosing) return
       if (!this.#playbackSourceQueue) this.#beginPlayback()
       const queue = this.#playbackSourceQueue
@@ -435,7 +435,12 @@ export class RealtimeAudioBridge {
   #handleOutputAudioEnd(_turn: RealtimeAudioTurnEnd): void {
     this.#assistantAudioBoundaryDeclared = true
     this.#clearOutputLifecycleWatchdog()
-    if (!this.#playbackSourceQueue || this.#playbackClosing) return
+    if (!this.#playbackSourceQueue) {
+      this.#assistantTranscriptCompleted = false
+      this.#assistantAudioBoundaryDeclared = false
+      return
+    }
+    if (this.#playbackClosing) return
     this.#playbackClosing = true
     this.#playbackReady?.resolve()
     this.#playbackSourceQueue.close()

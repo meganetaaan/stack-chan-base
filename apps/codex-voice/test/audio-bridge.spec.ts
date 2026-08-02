@@ -256,6 +256,48 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     }
   })
 
+  it('does not carry a silent turn transcript into the next playback', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+
+    try {
+      session.emit('audio', mirroredRtpFrame(0))
+      emitAssistantTranscriptDone(appServer)
+      const silentTurn = {
+        id: 'turn-silent',
+        startMilliseconds: 0,
+        endMilliseconds: 0,
+        transcript: '',
+      }
+      session.emit('audioEndDeclared', silentTurn)
+      session.emit('audioEnd', silentTurn)
+
+      session.emit('audio', mirroredRtpFrame(2_000))
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([])
+
+      controller.abort(new Error('silent turn test finished'))
+      device.playbackDrained.resolve()
+      await expect(running).rejects.toThrow('silent turn test finished')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('fails instead of waiting forever when v3 omits the output media boundary', async () => {
     vi.useFakeTimers()
     const appServer = new FakeAppServer()
