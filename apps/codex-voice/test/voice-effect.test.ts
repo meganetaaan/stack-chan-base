@@ -69,6 +69,18 @@ test('voice effect preflight reports a missing FFmpeg as a configuration error',
   )
 })
 
+test('voice effect preflight rejects an invalid timeout as a configuration error', async () => {
+  await assert.rejects(
+    assertVoiceEffectAvailable('cute', { probeTimeoutMilliseconds: 0 }),
+    (error: unknown) => {
+      assert.ok(error instanceof NonRetryableError)
+      assert.equal(error.reason, 'configuration')
+      assert.match(error.message, /positive number/)
+      return true
+    },
+  )
+})
+
 test('voice effect preflight terminates a hung FFmpeg probe', async (context) => {
   if (process.platform === 'win32') {
     context.skip('the voice service is POSIX-only')

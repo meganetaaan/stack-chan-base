@@ -112,7 +112,10 @@ export async function assertVoiceEffectAvailable(
   const timeoutMilliseconds = runtimeOptions.probeTimeoutMilliseconds ??
     VOICE_EFFECT_PROBE_TIMEOUT_MS
   if (!Number.isFinite(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
-    throw new RangeError('voice effect probe timeout must be a positive number')
+    throw new NonRetryableError(
+      'configuration',
+      'voice effect probe timeout must be a positive number',
+    )
   }
   const timeout = setTimeout(() => {
     controller.abort(
