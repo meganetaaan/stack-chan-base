@@ -298,6 +298,52 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     }
   })
 
+  it('matches a completed silent boundary when its transcript arrives later', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+    const missingNextBoundary = expect(running).rejects.toThrow(
+      'without declaring its RTP media boundary',
+    )
+
+    try {
+      const silentTurn = {
+        id: 'turn-boundary-first',
+        startMilliseconds: 0,
+        endMilliseconds: 0,
+        transcript: '',
+      }
+      session.emit('audioEndDeclared', silentTurn)
+      session.emit('audioEnd', silentTurn)
+      emitAssistantTranscriptDone(appServer)
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([])
+
+      emitAssistantTranscriptDone(appServer)
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([
+        '音声ブリッジエラー: Codex v3 completed the assistant transcript without declaring its RTP media boundary',
+      ])
+      await missingNextBoundary
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('fails instead of waiting forever when v3 omits the output media boundary', async () => {
     vi.useFakeTimers()
     const appServer = new FakeAppServer()

@@ -80,6 +80,8 @@ export class RealtimeAudioBridge {
   #playbackClosing = false
   #assistantTranscriptCompleted = false
   #assistantAudioBoundaryDeclared = false
+  #assistantAudioBoundaryCompleted = false
+  #assistantAudioBoundaryTurnId: string | undefined
   #outputLifecycleWatchdog: NodeJS.Timeout | undefined
   #terminalError: Error | undefined
 
@@ -347,11 +349,9 @@ export class RealtimeAudioBridge {
         if (this.#playbackReady === ready) this.#playbackReady = undefined
         this.#playbackTask = undefined
         this.#playbackClosing = false
-        this.#assistantTranscriptCompleted = false
-        this.#assistantAudioBoundaryDeclared = false
+        this.#resetAssistantOutputLifecycle()
         this.#sourceQueuedBytes = 0
         this.#playbackQueuedBytes = 0
-        this.#clearOutputLifecycleWatchdog()
         if (this.#running && !this.#terminalError) this.#startMicrophone()
       })
   }
@@ -416,34 +416,69 @@ export class RealtimeAudioBridge {
   #handleTranscriptDone(params: Record<string, unknown>): void {
     const role = typeof params.role === 'string' ? params.role : ''
     if (role === 'user') {
-      this.#assistantTranscriptCompleted = false
-      this.#assistantAudioBoundaryDeclared = false
+      this.#resetAssistantOutputLifecycle()
       void this.#setState('recognizing')
       return
     }
     if (role === 'assistant') {
       this.#assistantTranscriptCompleted = true
+      if (this.#finishSilentOutputLifecycle()) return
       this.#scheduleOutputLifecycleWatchdog()
     }
   }
 
-  #handleOutputAudioEndDeclared(_turn: RealtimeAudioTurnEnd): void {
+  #handleOutputAudioEndDeclared(turn: RealtimeAudioTurnEnd): void {
+    this.#recordAssistantAudioBoundary(turn)
     this.#assistantAudioBoundaryDeclared = true
     this.#clearOutputLifecycleWatchdog()
   }
 
-  #handleOutputAudioEnd(_turn: RealtimeAudioTurnEnd): void {
+  #handleOutputAudioEnd(turn: RealtimeAudioTurnEnd): void {
+    this.#recordAssistantAudioBoundary(turn)
     this.#assistantAudioBoundaryDeclared = true
+    this.#assistantAudioBoundaryCompleted = true
     this.#clearOutputLifecycleWatchdog()
     if (!this.#playbackSourceQueue) {
-      this.#assistantTranscriptCompleted = false
-      this.#assistantAudioBoundaryDeclared = false
+      this.#finishSilentOutputLifecycle()
       return
     }
     if (this.#playbackClosing) return
     this.#playbackClosing = true
     this.#playbackReady?.resolve()
     this.#playbackSourceQueue.close()
+  }
+
+  #recordAssistantAudioBoundary(turn: RealtimeAudioTurnEnd): void {
+    if (
+      this.#assistantAudioBoundaryTurnId !== undefined &&
+      this.#assistantAudioBoundaryTurnId !== turn.id
+    ) {
+      this.#fail(
+        new Error(
+          `Codex v3 overlapped output audio boundaries: ${this.#assistantAudioBoundaryTurnId} and ${turn.id}`,
+        ),
+      )
+      return
+    }
+    this.#assistantAudioBoundaryTurnId = turn.id
+  }
+
+  #finishSilentOutputLifecycle(): boolean {
+    if (
+      this.#playbackSourceQueue ||
+      !this.#assistantTranscriptCompleted ||
+      !this.#assistantAudioBoundaryCompleted
+    ) return false
+    this.#resetAssistantOutputLifecycle()
+    return true
+  }
+
+  #resetAssistantOutputLifecycle(): void {
+    this.#assistantTranscriptCompleted = false
+    this.#assistantAudioBoundaryDeclared = false
+    this.#assistantAudioBoundaryCompleted = false
+    this.#assistantAudioBoundaryTurnId = undefined
+    this.#clearOutputLifecycleWatchdog()
   }
 
   #fail(error: unknown): void {

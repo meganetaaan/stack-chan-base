@@ -75,7 +75,19 @@ test('voice effect preflight rejects an invalid timeout as a configuration error
     (error: unknown) => {
       assert.ok(error instanceof NonRetryableError)
       assert.equal(error.reason, 'configuration')
-      assert.match(error.message, /positive number/)
+      assert.match(error.message, /greater than 0/)
+      return true
+    },
+  )
+})
+
+test('voice effect preflight rejects a timeout above the Node timer limit', async () => {
+  await assert.rejects(
+    assertVoiceEffectAvailable('cute', { probeTimeoutMilliseconds: 2_147_483_648 }),
+    (error: unknown) => {
+      assert.ok(error instanceof NonRetryableError)
+      assert.equal(error.reason, 'configuration')
+      assert.match(error.message, /at most 2147483647 milliseconds/)
       return true
     },
   )

@@ -15,6 +15,8 @@ import {
 
 export type VoiceEffect = 'cute'
 
+const MAX_TIMER_DELAY_MILLISECONDS = 2_147_483_647
+
 export type PcmAudioTransform = (
   source: AsyncIterable<PcmChunk>,
   signal: AbortSignal,
@@ -111,10 +113,14 @@ export async function assertVoiceEffectAvailable(
   const controller = new AbortController()
   const timeoutMilliseconds = runtimeOptions.probeTimeoutMilliseconds ??
     VOICE_EFFECT_PROBE_TIMEOUT_MS
-  if (!Number.isFinite(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
+  if (
+    !Number.isFinite(timeoutMilliseconds) ||
+    timeoutMilliseconds <= 0 ||
+    timeoutMilliseconds > MAX_TIMER_DELAY_MILLISECONDS
+  ) {
     throw new NonRetryableError(
       'configuration',
-      'voice effect probe timeout must be a positive number',
+      `voice effect probe timeout must be greater than 0 and at most ${MAX_TIMER_DELAY_MILLISECONDS} milliseconds`,
     )
   }
   const timeout = setTimeout(() => {
