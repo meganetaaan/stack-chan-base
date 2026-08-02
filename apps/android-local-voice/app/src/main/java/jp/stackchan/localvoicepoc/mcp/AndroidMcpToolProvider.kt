@@ -14,6 +14,7 @@ import jp.stackchan.localvoicepoc.model.DeviceToolCall
 import jp.stackchan.localvoicepoc.model.ToolDefinition
 import jp.stackchan.localvoicepoc.realtime.McpServerRequest
 import jp.stackchan.localvoicepoc.realtime.McpToolCatalog
+import jp.stackchan.localvoicepoc.realtime.McpToolExecution
 import jp.stackchan.localvoicepoc.realtime.McpToolProvider
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
@@ -48,7 +49,7 @@ class AndroidMcpToolProvider(
     ) : McpToolCatalog {
         private val closed = AtomicBoolean(false)
 
-        override suspend fun execute(call: DeviceToolCall): String {
+        override suspend fun prepare(call: DeviceToolCall): McpToolExecution {
             check(!closed.get()) { "MCPカタログは終了済みです: ${request.serverLabel}" }
             val toolName = routes[call.name] ?: error("MCPツールが見つかりません: ${call.name}")
             if (forceApproval || request.requireApproval) {
@@ -57,20 +58,23 @@ class AndroidMcpToolProvider(
                 )
                 if (!approved) {
                     lifecycleSink("response.mcp_call.failed", request.serverLabel, "ユーザーが拒否しました")
-                    return "{\"error\":\"ユーザーがMCPツールの実行を拒否しました\"}"
+                    return McpToolExecution { "{\"error\":\"ユーザーがMCPツールの実行を拒否しました\"}" }
                 }
             }
-            lifecycleSink("response.mcp_call.in_progress", request.serverLabel, null)
-            return runCatching {
-                val result = client.callTool(toolName, call.arguments)
-                result.structuredContent?.toString() ?: result.content.joinToString("\n") { content ->
-                    (content as? TextContent)?.text ?: content.toString()
-                }
-            }.onSuccess {
-                lifecycleSink("response.mcp_call.completed", request.serverLabel, null)
-            }.onFailure {
-                lifecycleSink("response.mcp_call.failed", request.serverLabel, it.message)
-            }.getOrThrow()
+            return McpToolExecution {
+                check(!closed.get()) { "MCPカタログは終了済みです: ${request.serverLabel}" }
+                lifecycleSink("response.mcp_call.in_progress", request.serverLabel, null)
+                runCatching {
+                    val result = client.callTool(toolName, call.arguments)
+                    result.structuredContent?.toString() ?: result.content.joinToString("\n") { content ->
+                        (content as? TextContent)?.text ?: content.toString()
+                    }
+                }.onSuccess {
+                    lifecycleSink("response.mcp_call.completed", request.serverLabel, null)
+                }.onFailure {
+                    lifecycleSink("response.mcp_call.failed", request.serverLabel, it.message)
+                }.getOrThrow()
+            }
         }
 
         override fun close() {

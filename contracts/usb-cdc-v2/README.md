@@ -115,6 +115,7 @@ Codex app-server固有のJSON-RPC payloadをそのままFirmwareへ転送して�
 Android Realtime adapterへ送る`session.update`は一意な`event_id`を必須とする。
 Androidはtool catalogの入れ替え、旧世代の保留function破棄と実行中MCP取消しを1つのprovider世代遷移として確定してから、その`event_id`を有効化する。
 その後`session.updated`を送信し、一時的な書き込み失敗時は同じ世代が有効な間再送する。
+新世代のFirmware向けfunction callとMCP副作用dispatchは`session.updated`の書き込み成功まで開始せず、旧世代の決定的なevent送信・MCP dispatchとは世代遷移を挟んで直列化する。
 同じ`event_id`・同じ内容の`session.update`再送は、現在世代なら再適用せずackだけを再送し、終了済み世代なら拒否する。使用済みIDとpayloadはtransport session終了まで保持する。
 LLM応答は生成開始時のtool catalogとexecutorをsnapshotし、途中で`session.update`を受けても新世代へ差し替えない。
 AndroidがFirmware実行のfunction callを返す場合、`response.output_item.added`、`response.function_call_arguments.done`、`response.output_item.done`に、そのsnapshotの世代をStack-chan拡張field `stackchan_session_update_id`として付ける。

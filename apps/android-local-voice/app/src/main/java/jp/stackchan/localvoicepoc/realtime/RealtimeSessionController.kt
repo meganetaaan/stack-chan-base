@@ -48,9 +48,13 @@ data class McpServerRequest(
     val requireApproval: Boolean,
 )
 
+fun interface McpToolExecution {
+    suspend fun dispatch(): String
+}
+
 interface McpToolCatalog : AutoCloseable {
     val definitions: List<ToolDefinition.Mcp>
-    suspend fun execute(call: DeviceToolCall): String
+    suspend fun prepare(call: DeviceToolCall): McpToolExecution
     override fun close() = Unit
 }
 
@@ -80,6 +84,7 @@ class RealtimeSessionController(
         val mcpBinding: McpGenerationBinding,
     ) {
         val operations = linkedSetOf<Job>()
+        val acknowledged = CompletableDeferred<Unit>()
         lateinit var announcement: JsonObject
         var announcementJob: Job? = null
     }
@@ -101,8 +106,8 @@ class RealtimeSessionController(
 
         val definitions: List<ToolDefinition.Mcp> = catalogs.flatMap(McpToolCatalog::definitions)
 
-        suspend fun execute(call: DeviceToolCall): String =
-            requireNotNull(routes[call.name]) { "MCPツールが見つかりません: ${call.name}" }.execute(call)
+        suspend fun prepare(call: DeviceToolCall): McpToolExecution =
+            requireNotNull(routes[call.name]) { "MCPツールが見つかりません: ${call.name}" }.prepare(call)
 
         override fun close() {
             catalogs.forEach { catalog -> runCatching { catalog.close() } }
@@ -477,7 +482,13 @@ class RealtimeSessionController(
         call: DeviceToolCall,
         expectedProviderGeneration: ProviderGenerationLease,
     ): String = withProviderOperation(expectedProviderGeneration) {
-        expectedProviderGeneration.mcpBinding.execute(call)
+        val execution = expectedProviderGeneration.mcpBinding.prepare(call)
+        providerTransitionMutex.withLock {
+            synchronized(pendingFunctionsLock) {
+                requireCurrentProviderGeneration(expectedProviderGeneration)
+            }
+            execution.dispatch()
+        }
     }
 
     private suspend fun <Result> withProviderOperation(
@@ -491,6 +502,10 @@ class RealtimeSessionController(
                 expectedProviderGeneration.operations += operationJob
             }
             try {
+                expectedProviderGeneration.acknowledged.await()
+                synchronized(pendingFunctionsLock) {
+                    requireCurrentProviderGeneration(expectedProviderGeneration)
+                }
                 operation()
             } finally {
                 synchronized(pendingFunctionsLock) {
@@ -548,7 +563,10 @@ class RealtimeSessionController(
                     }
                 ) {
                     try {
-                        if (send(generation.announcement)) return@launch
+                        if (send(generation.announcement)) {
+                            generation.acknowledged.complete(Unit)
+                            return@launch
+                        }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (_: Throwable) {

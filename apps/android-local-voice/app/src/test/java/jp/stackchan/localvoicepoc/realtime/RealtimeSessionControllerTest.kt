@@ -289,6 +289,49 @@ class RealtimeSessionControllerTest {
     }
 
     @Test
+    fun doesNotEmitRemoteCallsBeforeTheProviderAcknowledgementIsWritten() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.clearSent()
+        transport.blockNextWrite()
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        withTimeout(500) { transport.blockedWriteAttempted.await() }
+        val executor = requireNotNull(registry.functionExecutor)
+        val result = async { executor.execute(DeviceToolCall("remote")) }
+        delay(20)
+        assertTrue(transport.payloads().none { it.type()?.startsWith("response.") == true })
+
+        transport.releaseBlockedWrite()
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        await { transport.payloads().any { it.type() == "response.function_call_arguments.done" } }
+        val payloads = transport.payloads()
+        val updateIndex = payloads.indexOfFirst { it.type() == "session.updated" }
+        val callIndex = payloads.indexOfFirst { it.type() == "response.function_call_arguments.done" }
+        assertTrue(updateIndex >= 0)
+        assertTrue(updateIndex < callIndex)
+        val callId = payloads[callIndex].getValue("call_id").jsonPrimitive.content
+        transport.receive(
+            """{"type":"conversation.item.create","event_id":"output","item":{"type":"function_call_output","call_id":"$callId","output":"acknowledged"}}""",
+        )
+
+        assertEquals("acknowledged", withTimeout(500) { result.await() })
+        controller.close()
+    }
+
+    @Test
     fun retriesTheCurrentUpdateIdempotentlyAndRejectsARetiredUpdateId() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.ALL)
         val registry = FakeRegistry()
@@ -435,6 +478,52 @@ class RealtimeSessionControllerTest {
         assertEquals(0, mcp.sideEffects)
         val currentExecutor = requireNotNull(registry.mcpExecutor)
         assertEquals("executed", currentExecutor.execute(DeviceToolCall("mcp__test__write")))
+        assertEquals(1, mcp.sideEffects)
+        controller.close()
+    }
+
+    @Test
+    fun serializesAnMcpDispatchBeforeTheProviderUpdateAcknowledgement() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = BlockingDispatchMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val executor = requireNotNull(registry.mcpExecutor)
+        transport.clearSent()
+
+        val result = async { executor.execute(DeviceToolCall("mcp__test__write")) }
+        withTimeout(500) { mcp.dispatchStarted.await() }
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-b","session":{"instructions":"updated"}}""",
+        )
+        delay(20)
+        assertTrue(
+            transport.payloads().none {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            },
+        )
+
+        mcp.releaseDispatch.complete(Unit)
+        assertEquals("executed", withTimeout(500) { result.await() })
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
         assertEquals(1, mcp.sideEffects)
         controller.close()
     }
@@ -689,7 +778,7 @@ class RealtimeSessionControllerTest {
     private class FakeMcp : McpToolProvider {
         override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog = object : McpToolCatalog {
             override val definitions: List<ToolDefinition.Mcp> = emptyList()
-            override suspend fun execute(call: DeviceToolCall): String = ""
+            override suspend fun prepare(call: DeviceToolCall) = McpToolExecution { "" }
         }
     }
 
@@ -709,11 +798,13 @@ class RealtimeSessionControllerTest {
                 ),
             )
 
-            override suspend fun execute(call: DeviceToolCall): String {
+            override suspend fun prepare(call: DeviceToolCall): McpToolExecution {
                 executionStarted.complete(Unit)
                 releaseExecution.await()
-                sideEffects += 1
-                return "executed"
+                return McpToolExecution {
+                    sideEffects += 1
+                    "executed"
+                }
             }
         }
     }
@@ -741,15 +832,40 @@ class RealtimeSessionControllerTest {
                 ),
             )
 
-            override suspend fun execute(call: DeviceToolCall): String {
+            override suspend fun prepare(call: DeviceToolCall) = McpToolExecution {
                 check(!closed) { "catalog is closed" }
-                return "catalog-$index"
+                "catalog-$index"
             }
 
             override fun close() {
                 if (closed) return
                 closed = true
                 closeCalls += 1
+            }
+        }
+    }
+
+    private class BlockingDispatchMcp : McpToolProvider {
+        val dispatchStarted = CompletableDeferred<Unit>()
+        val releaseDispatch = CompletableDeferred<Unit>()
+        var sideEffects = 0
+
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog = object : McpToolCatalog {
+            override val definitions = listOf(
+                ToolDefinition.Mcp(
+                    serverLabel = request.serverLabel,
+                    toolName = "write",
+                    name = "mcp__test__write",
+                    description = "",
+                    parameters = JsonObject(emptyMap()),
+                ),
+            )
+
+            override suspend fun prepare(call: DeviceToolCall) = McpToolExecution {
+                dispatchStarted.complete(Unit)
+                releaseDispatch.await()
+                sideEffects += 1
+                "executed"
             }
         }
     }
