@@ -336,6 +336,42 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     }
   })
 
+  it('watches a transcript-only turn when no RTP starts playback', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+    const failed = expect(running).rejects.toThrow(
+      'without declaring its RTP media boundary',
+    )
+
+    try {
+      emitAssistantTranscriptDone(appServer)
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([
+        '音声ブリッジエラー: Codex v3 completed the assistant transcript without declaring its RTP media boundary',
+      ])
+      expect(device.playbackCount).toBe(0)
+
+      await failed
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('rejects malformed remote RTP PCM at the session boundary', async () => {
     const appServer = new FakeAppServer()
     const device = new HoldingPlaybackDevice()

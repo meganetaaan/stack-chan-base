@@ -472,13 +472,15 @@ export class RealtimeAudioBridge {
     if (
       !this.#assistantTranscriptCompleted ||
       this.#assistantAudioBoundaryDeclared ||
-      !this.#playbackSourceQueue ||
       this.#playbackClosing
     ) return
     this.#clearOutputLifecycleWatchdog()
     this.#outputLifecycleWatchdog = setTimeout(() => {
       this.#outputLifecycleWatchdog = undefined
-      if (!this.#playbackSourceQueue || this.#playbackClosing) return
+      if (
+        !this.#assistantTranscriptCompleted ||
+        this.#assistantAudioBoundaryDeclared
+      ) return
       this.#fail(
         new Error(
           'Codex v3 completed the assistant transcript without declaring its RTP media boundary',
