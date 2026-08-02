@@ -250,6 +250,140 @@ class RealtimeSessionControllerTest {
     }
 
     @Test
+    fun retriesTheActiveProviderAnnouncementAfterAWriteFailure() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.clearSent()
+        transport.failNextWrites = 1
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        withTimeout(500) { transport.failedWriteAttempted.await() }
+        val executor = requireNotNull(registry.functionExecutor)
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        transport.clearSent()
+
+        val result = async { executor.execute(DeviceToolCall("remote")) }
+        await { transport.payloads().any { it.type() == "response.function_call_arguments.done" } }
+        val callId = transport.payloads()
+            .last { it.type() == "response.function_call_arguments.done" }
+            .getValue("call_id").jsonPrimitive.content
+        transport.receive(
+            """{"type":"conversation.item.create","event_id":"output","item":{"type":"function_call_output","call_id":"$callId","output":"recovered"}}""",
+        )
+
+        assertEquals("recovered", withTimeout(500) { result.await() })
+        controller.close()
+    }
+
+    @Test
+    fun serializesAProviderUpdateAfterAnAlreadyStartedFunctionEmission() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val retiredExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+        transport.blockNextWrite()
+
+        val retiredResult = async {
+            runCatching { retiredExecutor.execute(DeviceToolCall("remote")) }.exceptionOrNull()
+        }
+        withTimeout(500) { transport.blockedWriteAttempted.await() }
+        transport.receive(remoteToolUpdate("provider-b"))
+        delay(20)
+        assertTrue(
+            transport.payloads().none {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            },
+        )
+
+        transport.releaseBlockedWrite()
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+
+        val payloads = transport.payloads()
+        val argumentsIndex = payloads.indexOfFirst { it.type() == "response.function_call_arguments.done" }
+        val updateIndex = payloads.indexOfFirst {
+            it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+        }
+        assertTrue(argumentsIndex >= 0)
+        assertTrue(argumentsIndex < updateIndex)
+        assertTrue(withTimeout(500) { retiredResult.await() } != null)
+        controller.close()
+    }
+
+    @Test
+    fun cancelsAnMcpOperationWhenItsProviderGenerationIsRetired() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = BlockingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val retiredExecutor = requireNotNull(registry.mcpExecutor)
+
+        val retiredResult = async {
+            runCatching { retiredExecutor.execute(DeviceToolCall("mcp__test__write")) }.exceptionOrNull()
+        }
+        withTimeout(500) { mcp.executionStarted.await() }
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-b","session":{"instructions":"updated"}}""",
+        )
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        mcp.releaseExecution.complete(Unit)
+
+        assertTrue(withTimeout(500) { retiredResult.await() } != null)
+        assertEquals(0, mcp.sideEffects)
+        val currentExecutor = requireNotNull(registry.mcpExecutor)
+        assertEquals("executed", currentExecutor.execute(DeviceToolCall("mcp__test__write")))
+        assertEquals(1, mcp.sideEffects)
+        controller.close()
+    }
+
+    @Test
     fun ignoresInboundEventsWhenThePeerDidNotNegotiateEvent() = runBlocking {
         val transport = FakeUsbTransport(StackChanCapabilities.REQUIRED)
         val commands = FakeConversationCommands()
@@ -303,11 +437,12 @@ class RealtimeSessionControllerTest {
         commands: ConversationCommandHandler,
         scope: kotlinx.coroutines.CoroutineScope,
         registry: RemoteToolRegistry = FakeRegistry(),
+        mcp: McpToolProvider = FakeMcp(),
         monotonicTimeMilliseconds: () -> Long = { System.nanoTime() / 1_000_000L },
     ) = RealtimeSessionController(
         transport = transport,
         registry = registry,
-        mcp = FakeMcp(),
+        mcp = mcp,
         conversationCommands = commands,
         scope = scope,
         monotonicTimeMilliseconds = monotonicTimeMilliseconds,
@@ -328,6 +463,9 @@ class RealtimeSessionControllerTest {
     private fun remoteToolUpdate(eventId: String): String =
         """{"type":"session.update","event_id":"$eventId","session":{"tools":[{"type":"function","name":"remote","description":"","parameters":{"type":"object","properties":{}}}]}}"""
 
+    private fun mcpToolUpdate(eventId: String): String =
+        """{"type":"session.update","event_id":"$eventId","session":{"tools":[{"type":"mcp","server_label":"test","connector_id":"profile","require_approval":"always"}]}}"""
+
     private class FakeConversationCommands : ConversationCommandHandler {
         var startCalls = 0
         var stopCalls = 0
@@ -344,8 +482,10 @@ class RealtimeSessionControllerTest {
     }
 
     private class FakeRegistry : RemoteToolRegistry {
-        override val definitions: List<ToolDefinition> = emptyList()
+        @Volatile private var installedDefinitions: List<ToolDefinition> = emptyList()
+        override val definitions: List<ToolDefinition> get() = installedDefinitions
         @Volatile var functionExecutor: ToolExecutor? = null
+        @Volatile var mcpExecutor: ToolExecutor? = null
         @Volatile var clearCalls = 0
 
         override fun installRemoteTools(
@@ -353,18 +493,45 @@ class RealtimeSessionControllerTest {
             functionExecutor: ToolExecutor,
             mcpToolExecutor: ToolExecutor,
         ) {
+            installedDefinitions = tools
             this.functionExecutor = functionExecutor
+            this.mcpExecutor = mcpToolExecutor
         }
 
         override fun clearRemoteTools() {
             clearCalls += 1
+            installedDefinitions = emptyList()
             functionExecutor = null
+            mcpExecutor = null
         }
     }
 
     private class FakeMcp : McpToolProvider {
         override suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp> = emptyList()
         override suspend fun execute(call: DeviceToolCall): String = ""
+    }
+
+    private class BlockingMcp : McpToolProvider {
+        val executionStarted = CompletableDeferred<Unit>()
+        val releaseExecution = CompletableDeferred<Unit>()
+        var sideEffects = 0
+
+        override suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp> = listOf(
+            ToolDefinition.Mcp(
+                serverLabel = request.serverLabel,
+                toolName = "write",
+                name = "mcp__test__write",
+                description = "",
+                parameters = JsonObject(emptyMap()),
+            ),
+        )
+
+        override suspend fun execute(call: DeviceToolCall): String {
+            executionStarted.complete(Unit)
+            releaseExecution.await()
+            sideEffects += 1
+            return "executed"
+        }
     }
 
     private class FakeUsbTransport(capabilities: Int) : StackChanUsbTransport {
@@ -379,12 +546,21 @@ class RealtimeSessionControllerTest {
         override val frames = mutableFrames
         var failNextWrites = 0
         val failedWriteAttempted = CompletableDeferred<Unit>()
+        var blockedWriteAttempted = CompletableDeferred<Unit>()
+            private set
+        private var blockNextWrite = false
+        private var releaseBlockedWrite = CompletableDeferred(Unit)
 
         override suspend fun send(frame: StackChanFrame) {
             if (failNextWrites > 0) {
                 failNextWrites -= 1
                 failedWriteAttempted.complete(Unit)
                 throw IOException("simulated write failure")
+            }
+            if (blockNextWrite) {
+                blockNextWrite = false
+                blockedWriteAttempted.complete(Unit)
+                releaseBlockedWrite.await()
             }
             sent += frame
         }
@@ -405,6 +581,17 @@ class RealtimeSessionControllerTest {
         }
 
         fun clearSent() = sent.clear()
+
+        fun blockNextWrite() {
+            check(!blockNextWrite && releaseBlockedWrite.isCompleted) { "a write is already blocked" }
+            blockedWriteAttempted = CompletableDeferred()
+            releaseBlockedWrite = CompletableDeferred()
+            blockNextWrite = true
+        }
+
+        fun releaseBlockedWrite() {
+            releaseBlockedWrite.complete(Unit)
+        }
 
         fun payloads(): List<JsonObject> {
             val decoder = StackChanEventDecoder()
