@@ -11,6 +11,7 @@ import jp.stackchan.localvoicepoc.serial.StackChanEventEncoder
 import jp.stackchan.localvoicepoc.serial.StackChanFrame
 import jp.stackchan.localvoicepoc.serial.StackChanUsbState
 import jp.stackchan.localvoicepoc.serial.StackChanUsbTransport
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -430,11 +431,43 @@ class RealtimeSessionControllerTest {
         }
         mcp.releaseExecution.complete(Unit)
 
-        assertTrue(withTimeout(500) { retiredResult.await() } != null)
+        assertTrue(withTimeout(500) { retiredResult.await() } is IllegalStateException)
         assertEquals(0, mcp.sideEffects)
         val currentExecutor = requireNotNull(registry.mcpExecutor)
         assertEquals("executed", currentExecutor.execute(DeviceToolCall("mcp__test__write")))
         assertEquals(1, mcp.sideEffects)
+        controller.close()
+    }
+
+    @Test
+    fun preservesCallerCancellationForACurrentProviderOperation() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = BlockingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val executor = requireNotNull(registry.mcpExecutor)
+
+        val operation = async { executor.execute(DeviceToolCall("mcp__test__write")) }
+        withTimeout(500) { mcp.executionStarted.await() }
+        operation.cancel()
+        val failure = runCatching { operation.await() }.exceptionOrNull()
+
+        assertTrue(failure is CancellationException)
+        assertEquals(0, mcp.sideEffects)
         controller.close()
     }
 

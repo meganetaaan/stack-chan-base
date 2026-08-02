@@ -78,6 +78,8 @@ class RealtimeSessionController(
         var announcementJob: Job? = null
     }
 
+    private class ProviderGenerationRetiredCancellation(reason: String) : CancellationException(reason)
+
     private data class PendingFunction(
         val providerGeneration: ProviderGenerationLease,
         val result: CompletableDeferred<String>,
@@ -405,19 +407,23 @@ class RealtimeSessionController(
     private suspend fun <Result> withProviderOperation(
         expectedProviderGeneration: ProviderGenerationLease,
         operation: suspend () -> Result,
-    ): Result = coroutineScope {
-        val operationJob = requireNotNull(currentCoroutineContext()[Job])
-        synchronized(pendingFunctionsLock) {
-            requireCurrentProviderGeneration(expectedProviderGeneration)
-            expectedProviderGeneration.operations += operationJob
-        }
-        try {
-            operation()
-        } finally {
+    ): Result = try {
+        coroutineScope {
+            val operationJob = requireNotNull(currentCoroutineContext()[Job])
             synchronized(pendingFunctionsLock) {
-                expectedProviderGeneration.operations -= operationJob
+                requireCurrentProviderGeneration(expectedProviderGeneration)
+                expectedProviderGeneration.operations += operationJob
+            }
+            try {
+                operation()
+            } finally {
+                synchronized(pendingFunctionsLock) {
+                    expectedProviderGeneration.operations -= operationJob
+                }
             }
         }
+    } catch (retired: ProviderGenerationRetiredCancellation) {
+        throw IllegalStateException(retired.message ?: "Realtime provider世代は終了しました", retired)
     }
 
     private fun requireCurrentProviderGeneration(expectedProviderGeneration: ProviderGenerationLease) {
@@ -459,6 +465,7 @@ class RealtimeSessionController(
         lateinit var announcementJob: Job
         announcementJob = scope.launch(start = CoroutineStart.LAZY) {
             try {
+                var retryDelayMilliseconds = PROVIDER_ANNOUNCEMENT_RETRY_MS
                 while (
                     synchronized(pendingFunctionsLock) {
                         providerGeneration === generation && remoteFunctionsAvailable && !controllerClosed
@@ -471,7 +478,9 @@ class RealtimeSessionController(
                     } catch (_: Throwable) {
                         // Retry the acknowledgement while this provider generation owns the session.
                     }
-                    delay(PROVIDER_ANNOUNCEMENT_RETRY_MS)
+                    delay(retryDelayMilliseconds)
+                    retryDelayMilliseconds = (retryDelayMilliseconds * 2)
+                        .coerceAtMost(PROVIDER_ANNOUNCEMENT_MAX_RETRY_MS)
                 }
             } finally {
                 synchronized(pendingFunctionsLock) {
@@ -586,7 +595,7 @@ class RealtimeSessionController(
     private fun cancelRetiredProviderWork(work: RetiredProviderWork, reason: String) {
         val failure = IllegalStateException(reason)
         work.functions.forEach { it.completeExceptionally(failure) }
-        val cancellation = CancellationException(reason)
+        val cancellation = ProviderGenerationRetiredCancellation(reason)
         work.operations.forEach { it.cancel(cancellation) }
         work.announcementJob?.cancel(cancellation)
     }
@@ -631,5 +640,6 @@ class RealtimeSessionController(
     private companion object {
         const val FUNCTION_TIMEOUT_MS = 30_000L
         const val PROVIDER_ANNOUNCEMENT_RETRY_MS = 100L
+        const val PROVIDER_ANNOUNCEMENT_MAX_RETRY_MS = 2_000L
     }
 }
