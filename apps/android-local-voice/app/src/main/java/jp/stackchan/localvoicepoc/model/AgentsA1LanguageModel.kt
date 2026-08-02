@@ -75,7 +75,8 @@ class AgentsA1LanguageModel(
             check(!closed.get()) { "Agents A1は終了済みです" }
             check(isLoaded) { "Agents A1がロードされていません" }
             val warmUp = isWarmUp(request)
-            var prompt = conversationPrompt(request, includeTools = !warmUp)
+            val toolSnapshot = tools.snapshot()
+            var prompt = conversationPrompt(request, toolSnapshot, includeTools = !warmUp)
             val called = mutableSetOf<String>()
             repeat(MAX_TOOL_CALLS + 1) { attempt ->
                 val generated = generateBuffered(prompt, request)
@@ -92,11 +93,11 @@ class AgentsA1LanguageModel(
                     return@flow
                 }
                 check(attempt < MAX_TOOL_CALLS) { "1回の応答で利用できるツール回数を超えました" }
-                check(call.name in tools.supportedNames) { "未対応のツールです: ${call.name}" }
+                check(call.name in toolSnapshot.supportedNames) { "未対応のツールです: ${call.name}" }
                 check(called.add("${call.name}:${call.arguments}")) {
                     "同じツール呼び出しの繰り返しを停止しました: ${call.name}"
                 }
-                val result = tools.execute(call)
+                val result = toolSnapshot.execute(call)
                 prompt = continueAfterTool(prompt, generated, result)
             }
             error("Agents A1のツール処理が終了しませんでした")
@@ -133,6 +134,7 @@ class AgentsA1LanguageModel(
 
     private fun conversationPrompt(
         request: GenerationRequest,
+        toolSnapshot: DeviceToolRegistry.Snapshot,
         includeTools: Boolean,
     ): String = buildString {
         append(IM_START)
@@ -140,7 +142,7 @@ class AgentsA1LanguageModel(
         append(request.systemInstruction)
         if (includeTools) {
             append("\n\n")
-            append(tools.prompt)
+            append(toolSnapshot.prompt)
         }
         append(IM_END)
         append('\n')

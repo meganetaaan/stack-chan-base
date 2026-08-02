@@ -111,6 +111,14 @@ Stack-chan共通eventはトップレベルに`schema: "stackchan.event.v1"`、`t
 このschemaを持つ未知または不正なeventを、schemaのないraw Realtime eventとして処理してはならない。
 壊れたJSONまたは不正なapplication eventはそのeventだけを破棄し、後続eventの受信を継続する。
 Codex app-server固有のJSON-RPC payloadをそのままFirmwareへ転送してはならない。
+
+Android Realtime adapterへ送る`session.update`は一意な`event_id`を必須とする。
+Androidはtool catalogの入れ替えと旧世代の保留tool call破棄を終え、`session.updated`を送信queueへ入れた後に、その`event_id`をprovider世代として有効化する。
+LLM応答は生成開始時のtool catalogとexecutorをsnapshotし、途中で`session.update`を受けても新世代へ差し替えない。
+AndroidがFirmware実行のfunction callを返す場合、`response.output_item.added`、`response.function_call_arguments.done`、`response.output_item.done`に、そのsnapshotの世代をStack-chan拡張field `stackchan_session_update_id`として付ける。
+Firmwareは確認済み`session.updated.event_id`と`stackchan_session_update_id`が一致するcallだけを実行し、欠落または不一致を破棄する。
+この世代fieldを持たない旧Androidと、fieldを必須とするFirmwareの組み合わせはfunction tool非互換である。
+
 Codex音声ブリッジは、コマンド実行とファイル変更を次の共通eventへ正規化する。
 
 | direction | type | purpose |

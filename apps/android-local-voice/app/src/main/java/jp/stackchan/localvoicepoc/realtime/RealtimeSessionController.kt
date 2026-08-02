@@ -63,13 +63,19 @@ class RealtimeSessionController(
         val retainedUntilMilliseconds: Long,
     )
 
+    private data class PendingFunction(
+        val providerGeneration: String,
+        val result: CompletableDeferred<String>,
+    )
+
     private val encoder = StackChanEventEncoder()
     private val decoder = StackChanEventDecoder()
     private val decoderLock = Any()
     private val pendingFunctionsLock = Any()
-    private val pendingFunctions = mutableMapOf<String, CompletableDeferred<String>>()
+    private val pendingFunctions = mutableMapOf<String, PendingFunction>()
     private val conversationResults = LinkedHashMap<String, CachedConversationResult>()
     private var remoteFunctionsAvailable = false
+    private var providerGeneration: String? = null
     private var controllerClosed = false
     private var instructionOverlay = ""
     private var remoteDefinitions: List<ToolDefinition> = emptyList()
@@ -206,7 +212,8 @@ class RealtimeSessionController(
     }
 
     private suspend fun applySessionUpdate(root: JsonObject, eventId: String?) {
-        runCatching {
+        try {
+            val nextProviderGeneration = requireNotNull(eventId) { "session.updateにはevent_idが必要です" }
             val session = root["session"]?.jsonObject ?: error("sessionがありません")
             val nextInstructions = if ("instructions" in session) {
                 session["instructions"]?.jsonPrimitive?.contentOrNull ?: ""
@@ -214,13 +221,25 @@ class RealtimeSessionController(
                 instructionOverlay
             }
             val nextTools = if ("tools" in session) parseTools(session["tools"]!!.jsonArray) else remoteDefinitions
+            registry.installRemoteTools(
+                nextTools,
+                ToolExecutor { call -> executeRemoteFunction(call, nextProviderGeneration) },
+                ToolExecutor { call -> executeMcp(call, nextProviderGeneration) },
+            )
             instructionOverlay = nextInstructions
             remoteDefinitions = nextTools
-            registry.installRemoteTools(nextTools, ToolExecutor(::executeRemoteFunction), ToolExecutor(mcp::execute))
-        }.onSuccess {
-            sendSessionEvent("session.updated", eventId)
-        }.onFailure {
-            sendError(eventId, "invalid_request", it.message ?: "session.updateを適用できません")
+            invalidateProviderGeneration("ツール設定が更新されました")
+            sendSessionEvent("session.updated", nextProviderGeneration)
+            synchronized(pendingFunctionsLock) {
+                check(remoteFunctionsAvailable && !controllerClosed) {
+                    "Realtimeセッションは利用できません"
+                }
+                providerGeneration = nextProviderGeneration
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            sendError(eventId, "invalid_request", error.message ?: "session.updateを適用できません")
         }
     }
 
@@ -266,56 +285,75 @@ class RealtimeSessionController(
         return result
     }
 
-    private suspend fun executeRemoteFunction(call: DeviceToolCall): String {
+    private suspend fun executeRemoteFunction(call: DeviceToolCall, expectedProviderGeneration: String): String {
         val callId = UUID.randomUUID().toString()
         val itemId = UUID.randomUUID().toString()
         val responseId = UUID.randomUUID().toString()
         val result = CompletableDeferred<String>()
+        val pending = PendingFunction(expectedProviderGeneration, result)
         synchronized(pendingFunctionsLock) {
-            check(remoteFunctionsAvailable && !controllerClosed) {
-                "Realtimeセッションは利用できません"
-            }
-            pendingFunctions[callId] = result
+            requireCurrentProviderGeneration(expectedProviderGeneration)
+            pendingFunctions[callId] = pending
         }
-        send(buildJsonObject {
-            put("type", "response.output_item.added")
-            put("response_id", responseId)
-            put("item", buildJsonObject {
-                put("id", itemId)
-                put("type", "function_call")
-                put("call_id", callId)
-                put("name", call.name)
-                put("arguments", "")
-            })
-        })
-        send(
-            buildJsonObject {
-                put("type", "response.function_call_arguments.done")
-                put("event_id", UUID.randomUUID().toString())
-                put("response_id", responseId)
-                put("item_id", itemId)
-                put("call_id", callId)
-                put("name", call.name)
-                put("arguments", call.arguments.toString())
-            },
-        )
-        send(buildJsonObject {
-            put("type", "response.output_item.done")
-            put("response_id", responseId)
-            put("item", buildJsonObject {
-                put("id", itemId)
-                put("type", "function_call")
-                put("call_id", callId)
-                put("name", call.name)
-                put("arguments", call.arguments.toString())
-            })
-        })
         return try {
+            send(buildJsonObject {
+                put("type", "response.output_item.added")
+                put("response_id", responseId)
+                put("stackchan_session_update_id", expectedProviderGeneration)
+                put("item", buildJsonObject {
+                    put("id", itemId)
+                    put("type", "function_call")
+                    put("call_id", callId)
+                    put("name", call.name)
+                    put("arguments", "")
+                })
+            })
+            send(
+                buildJsonObject {
+                    put("type", "response.function_call_arguments.done")
+                    put("event_id", UUID.randomUUID().toString())
+                    put("response_id", responseId)
+                    put("item_id", itemId)
+                    put("call_id", callId)
+                    put("name", call.name)
+                    put("arguments", call.arguments.toString())
+                    put("stackchan_session_update_id", expectedProviderGeneration)
+                },
+            )
+            send(buildJsonObject {
+                put("type", "response.output_item.done")
+                put("response_id", responseId)
+                put("stackchan_session_update_id", expectedProviderGeneration)
+                put("item", buildJsonObject {
+                    put("id", itemId)
+                    put("type", "function_call")
+                    put("call_id", callId)
+                    put("name", call.name)
+                    put("arguments", call.arguments.toString())
+                })
+            })
             withTimeout(FUNCTION_TIMEOUT_MS) { result.await() }
         } finally {
             synchronized(pendingFunctionsLock) {
-                pendingFunctions.remove(callId)
+                if (pendingFunctions[callId] === pending) pendingFunctions.remove(callId)
             }
+        }
+    }
+
+    private suspend fun executeMcp(call: DeviceToolCall, expectedProviderGeneration: String): String {
+        synchronized(pendingFunctionsLock) {
+            requireCurrentProviderGeneration(expectedProviderGeneration)
+        }
+        return mcp.execute(call)
+    }
+
+    private fun requireCurrentProviderGeneration(expectedProviderGeneration: String) {
+        check(
+            remoteFunctionsAvailable &&
+                !controllerClosed &&
+                providerGeneration == expectedProviderGeneration,
+        ) {
+            "Realtime provider世代は終了しました"
         }
     }
 
@@ -329,7 +367,10 @@ class RealtimeSessionController(
             if (it is JsonPrimitive && it.isString) it.content else it.toString()
         } ?: ""
         val completed = synchronized(pendingFunctionsLock) {
-            pendingFunctions[callId]?.complete(output) == true
+            val pending = pendingFunctions[callId]
+            pending != null &&
+                pending.providerGeneration == providerGeneration &&
+                pending.result.complete(output)
         }
         if (!completed) {
             return sendError(eventId, "unknown_call_id", "対応するfunction callがありません")
@@ -403,14 +444,23 @@ class RealtimeSessionController(
         }
     }
 
+    private fun invalidateProviderGeneration(reason: String) {
+        val functionsToFail = synchronized(pendingFunctionsLock) {
+            providerGeneration = null
+            pendingFunctions.values.map(PendingFunction::result).also { pendingFunctions.clear() }
+        }
+        functionsToFail.forEach { it.completeExceptionally(IllegalStateException(reason)) }
+    }
+
     private fun resetSession(reason: String, closing: Boolean = false) {
         val functionsToFail = synchronized(pendingFunctionsLock) {
             remoteFunctionsAvailable = false
+            providerGeneration = null
             if (closing) {
                 controllerClosed = true
                 conversationResults.clear()
             }
-            pendingFunctions.values.toList().also { pendingFunctions.clear() }
+            pendingFunctions.values.map(PendingFunction::result).also { pendingFunctions.clear() }
         }
         functionsToFail.forEach { it.completeExceptionally(IllegalStateException(reason)) }
         synchronized(decoderLock) { decoder.reset() }

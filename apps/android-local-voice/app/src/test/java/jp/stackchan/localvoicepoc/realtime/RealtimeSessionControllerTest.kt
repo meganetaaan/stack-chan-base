@@ -171,7 +171,11 @@ class RealtimeSessionControllerTest {
         transport.receive(
             """{"type":"session.update","event_id":"tools","session":{"tools":[{"type":"function","name":"remote","description":"","parameters":{"type":"object","properties":{}}}]}}""",
         )
-        await { registry.functionExecutor != null }
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "tools"
+            }
+        }
         val executor = requireNotNull(registry.functionExecutor)
 
         val registered = async {
@@ -191,6 +195,57 @@ class RealtimeSessionControllerTest {
 
         assertTrue(registeredFailure is IllegalStateException)
         assertTrue(lateFailure is IllegalStateException)
+        controller.close()
+    }
+
+    @Test
+    fun rejectsToolCallsFromAResponseThatStartedBeforeTheProviderUpdate() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val retiredExecutor = requireNotNull(registry.functionExecutor)
+
+        transport.receive(remoteToolUpdate("provider-b"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        val currentExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+
+        val retiredFailure = runCatching {
+            retiredExecutor.execute(DeviceToolCall("remote"))
+        }.exceptionOrNull()
+        assertTrue(retiredFailure is IllegalStateException)
+        assertTrue(transport.payloads().none { it.type() == "response.function_call_arguments.done" })
+
+        val currentResult = async { currentExecutor.execute(DeviceToolCall("remote")) }
+        await {
+            transport.payloads().any { it.type() == "response.function_call_arguments.done" }
+        }
+        val functionCall = transport.payloads().last { it.type() == "response.function_call_arguments.done" }
+        assertEquals("provider-b", functionCall.getValue("stackchan_session_update_id").jsonPrimitive.content)
+        val callId = functionCall.getValue("call_id").jsonPrimitive.content
+        transport.receive(
+            """{"type":"conversation.item.create","event_id":"output","item":{"type":"function_call_output","call_id":"$callId","output":"current"}}""",
+        )
+
+        assertEquals("current", withTimeout(500) { currentResult.await() })
         controller.close()
     }
 
@@ -269,6 +324,9 @@ class RealtimeSessionControllerTest {
 
     private fun stopRequest(requestId: String): String =
         """{"schema":"stackchan.event.v1","type":"conversation.stop","requestId":"$requestId","source":"headTouch","gesture":"backwardSwipe"}"""
+
+    private fun remoteToolUpdate(eventId: String): String =
+        """{"type":"session.update","event_id":"$eventId","session":{"tools":[{"type":"function","name":"remote","description":"","parameters":{"type":"object","properties":{}}}]}}"""
 
     private class FakeConversationCommands : ConversationCommandHandler {
         var startCalls = 0
