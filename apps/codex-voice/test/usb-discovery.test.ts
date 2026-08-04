@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   selectStackChanDeviceId,
+  selectStackChanDevices,
   selectStackChanPort,
 } from '../src/usb/device.js'
 
@@ -24,6 +25,12 @@ const PORTS = [
     productId: '5678',
     serialNumber: 'NOT-STACKCHAN',
   },
+  {
+    path: '/dev/ttyACM2',
+    vendorId: '303a',
+    productId: '1001',
+    serialNumber: undefined,
+  },
 ]
 
 test('USB device ID pins discovery to the requested CoreS3', () => {
@@ -35,6 +42,23 @@ test('USB device ID pins discovery to the requested CoreS3', () => {
     selectStackChanPort(PORTS, 'STACKCHAN-SECONDARY'),
     '/dev/ttyACM1',
   )
+})
+
+test('USB discovery exposes all compatible CoreS3 devices in stable path order', () => {
+  assert.deepEqual(selectStackChanDevices([...PORTS].reverse()), [
+    {
+      path: '/dev/ttyACM0',
+      deviceId: 'STACKCHAN-PRIMARY',
+    },
+    {
+      path: '/dev/ttyACM1',
+      deviceId: 'STACKCHAN-SECONDARY',
+    },
+    {
+      path: '/dev/ttyACM2',
+      deviceId: undefined,
+    },
+  ])
 })
 
 test('USB auto-discovery fails closed when multiple CoreS3 devices exist', () => {

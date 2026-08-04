@@ -71,6 +71,8 @@ test('app-server initialization opts into experimental APIs without attestation 
       realtime_conversation: true,
     },
   })
+  assert.equal(threadRequest.params.approvalPolicy, 'on-request')
+  assert.equal(threadRequest.params.approvalsReviewer, 'user')
   assert.deepEqual(threadRequest.params.dynamicTools, dynamicTools)
   fromServer.write(`${JSON.stringify({ id: threadRequest.id, result: { thread: { id: 'thread-1' } } })}\n`)
   assert.equal(await opened, 'thread-1')

@@ -8,7 +8,7 @@ import {
   type RpcNotification,
   type RpcServerRequest,
 } from './codex/rpc.js'
-import type { RunOptions } from './cli-options.js'
+import type { ApplicationRunOptions } from './cli-options.js'
 import { ConversationSessionController } from './conversation/session-controller.js'
 import {
   ExponentialRetryBackoff,
@@ -22,7 +22,7 @@ import {
 import { UsbStackChanDevice } from './usb/device.js'
 import type { LoadedWorkspace } from './workspace.js'
 
-export type ApplicationOptions = RunOptions & {
+export type ApplicationOptions = ApplicationRunOptions & {
   workspace: LoadedWorkspace
 }
 
