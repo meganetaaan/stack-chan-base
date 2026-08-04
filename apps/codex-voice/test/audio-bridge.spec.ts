@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Deferred } from '../src/async.js'
 import { RealtimeAudioBridge, type AudioBridgeLogger } from '../src/audio/bridge.js'
 import { decodePcm16Le, encodePcm16Le, pcmChunk } from '../src/audio/pcm.js'
@@ -101,6 +101,17 @@ function emitAssistantTranscriptDone(appServer: FakeAppServer): void {
   })
 }
 
+function emitUserTranscriptDone(appServer: FakeAppServer): void {
+  appServer.emit('notification', {
+    method: 'thread/realtime/transcript/done',
+    params: {
+      threadId: appServer.threadId,
+      role: 'user',
+      text: 'request',
+    },
+  })
+}
+
 describe('RealtimeAudioBridge WebRTC output source', () => {
   const controllers: AbortController[] = []
   const devices: HoldingPlaybackDevice[] = []
@@ -169,7 +180,7 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     await expect(running).rejects.toThrow('source test finished')
   })
 
-  it('does not fail when delayed mirrored RTP arrives after transcript completion', async () => {
+  it('plays RTP arriving after transcript completion until the media boundary', async () => {
     const appServer = new FakeAppServer()
     const device = new HoldingPlaybackDevice()
     const session = new FakeRealtimeSession()
@@ -193,14 +204,230 @@ describe('RealtimeAudioBridge WebRTC output source', () => {
     await waitUntil(() => device.playbackChunks.length >= 12)
 
     emitAssistantTranscriptDone(appServer)
+    const turn = {
+      id: 'turn-1',
+      startMilliseconds: 0,
+      endMilliseconds: 260,
+      transcript: 'done',
+    }
+    session.emit('audioEndDeclared', turn)
     await new Promise((resolve) => setTimeout(resolve, 550))
     session.emit('audio', mirroredRtpFrame(2_000))
+    await waitUntil(() => device.playbackChunks.length >= 13)
+    session.emit('audioEnd', turn)
 
     expect(errors).toEqual([])
+    expect(device.playbackChunks).toHaveLength(13)
 
     controller.abort(new Error('late RTP test finished'))
     device.playbackDrained.resolve()
     await expect(running).rejects.toThrow('late RTP test finished')
+  })
+
+  it('does not time out long playout after the RTP boundary is declared', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+
+    try {
+      for (let index = 0; index < 12; index += 1) {
+        session.emit('audio', mirroredRtpFrame(2_000))
+      }
+      emitAssistantTranscriptDone(appServer)
+      const turn = {
+        id: 'turn-long',
+        startMilliseconds: 0,
+        endMilliseconds: 12_000,
+        transcript: 'long response',
+      }
+      session.emit('audioEndDeclared', turn)
+
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(errors).toEqual([])
+
+      session.emit('audioEnd', turn)
+      controller.abort(new Error('long playout test finished'))
+      device.playbackDrained.resolve()
+      await expect(running).rejects.toThrow('long playout test finished')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not carry a silent turn transcript into the next playback', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+
+    try {
+      session.emit('audio', mirroredRtpFrame(0))
+      emitAssistantTranscriptDone(appServer)
+      const silentTurn = {
+        id: 'turn-silent',
+        startMilliseconds: 0,
+        endMilliseconds: 0,
+        transcript: '',
+      }
+      session.emit('audioEndDeclared', silentTurn)
+      session.emit('audioEnd', silentTurn)
+
+      session.emit('audio', mirroredRtpFrame(2_000))
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([])
+
+      controller.abort(new Error('silent turn test finished'))
+      device.playbackDrained.resolve()
+      await expect(running).rejects.toThrow('silent turn test finished')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('matches a completed silent boundary across delayed transcript notifications', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+    const missingNextBoundary = expect(running).rejects.toThrow(
+      'without declaring its RTP media boundary',
+    )
+
+    try {
+      const silentTurn = {
+        id: 'turn-boundary-first',
+        startMilliseconds: 0,
+        endMilliseconds: 0,
+        transcript: '',
+      }
+      session.emit('audioEndDeclared', silentTurn)
+      session.emit('audioEnd', silentTurn)
+      emitUserTranscriptDone(appServer)
+      emitAssistantTranscriptDone(appServer)
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([])
+
+      emitAssistantTranscriptDone(appServer)
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([
+        '音声ブリッジエラー: Codex v3 completed the assistant transcript without declaring its RTP media boundary',
+      ])
+      await missingNextBoundary
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fails instead of waiting forever when v3 omits the output media boundary', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+
+    try {
+      session.emit('audio', mirroredRtpFrame(2_000))
+      emitAssistantTranscriptDone(appServer)
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(errors).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(errors).toEqual([
+        '音声ブリッジエラー: Codex v3 completed the assistant transcript without declaring its RTP media boundary',
+      ])
+
+      device.playbackDrained.resolve()
+      await expect(running).rejects.toThrow(
+        'without declaring its RTP media boundary',
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('watches a transcript-only turn when no RTP starts playback', async () => {
+    vi.useFakeTimers()
+    const appServer = new FakeAppServer()
+    const device = new HoldingPlaybackDevice()
+    const session = new FakeRealtimeSession()
+    const controller = new AbortController()
+    const { errors, logger } = recordingLogger()
+    controllers.push(controller)
+    devices.push(device)
+    const bridge = new RealtimeAudioBridge(
+      appServer as unknown as CodexAppServer,
+      device as unknown as StackChanDevice,
+      undefined,
+      logger,
+      () => session,
+    )
+    const running = bridge.run(controller.signal)
+    const failed = expect(running).rejects.toThrow(
+      'without declaring its RTP media boundary',
+    )
+
+    try {
+      emitAssistantTranscriptDone(appServer)
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(errors).toEqual([
+        '音声ブリッジエラー: Codex v3 completed the assistant transcript without declaring its RTP media boundary',
+      ])
+      expect(device.playbackCount).toBe(0)
+
+      await failed
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('rejects malformed remote RTP PCM at the session boundary', async () => {

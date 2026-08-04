@@ -9,6 +9,7 @@ import {
   STACKCHAN_HOST_CAPABILITIES,
   STACKCHAN_MAX_PAYLOAD_BYTES,
   StackChanControl,
+  StackChanEventDecoder,
   StackChanFrameParser,
   StackChanFrameType,
   uint32Payload,
@@ -21,11 +22,13 @@ class BootingSerialPort extends EventEmitter {
   speakerStartCount = 0
   speakerEndCount = 0
   speakerAbortCount = 0
+  readonly events: string[] = []
   microphoneStopAcknowledgementsToDrop = 0
   destroyed = false
   flushed = false
   controlLines: { dtr: boolean; rts: boolean } | undefined
   readonly #parser = new StackChanFrameParser()
+  readonly #eventDecoder = new StackChanEventDecoder()
   readonly #streamMicrophone: boolean
   readonly #acknowledgeMicrophoneStop: boolean
   readonly #streamSpeaker: boolean
@@ -59,6 +62,11 @@ class BootingSerialPort extends EventEmitter {
 
   write(data: Uint8Array, callback: (error?: Error | null) => void): void {
     for (const frame of this.#parser.push(data)) {
+      if (frame.type === StackChanFrameType.EVENT) {
+        const payload = this.#eventDecoder.push(frame)
+        if (payload) this.events.push(new TextDecoder().decode(payload))
+        continue
+      }
       if (frame.type !== StackChanFrameType.CONTROL) continue
       if (frame.flags === StackChanControl.HELLO) {
         this.helloCount += 1
@@ -173,6 +181,26 @@ test('USB handshake clears reset lines and retries HELLO while CoreS3 boots', as
   await device.close()
   assert.equal(port.flushed, true)
   assert.equal(port.destroyed, true)
+})
+
+test('task execution state is sent as an application event', async () => {
+  const port = new BootingSerialPort()
+  const device = new UsbStackChanDevice({
+    portPath: '/dev/fake-stackchan',
+    portFactory: () => port,
+    openSettleMilliseconds: 0,
+  })
+  await device.connect(new AbortController().signal)
+
+  await device.setTaskState('running')
+
+  assert.equal(port.events.length, 1)
+  const event = JSON.parse(port.events[0]!) as Record<string, unknown>
+  assert.equal(event.schema, 'stackchan.event.v1')
+  assert.equal(event.type, 'task.status')
+  assert.equal(event.state, 'running')
+  assert.match(String(event.requestId), /^task-[0-9a-f-]{36}$/)
+  await device.close()
 })
 
 test('USB handshake failure releases the port and allows retrying the same device', async () => {

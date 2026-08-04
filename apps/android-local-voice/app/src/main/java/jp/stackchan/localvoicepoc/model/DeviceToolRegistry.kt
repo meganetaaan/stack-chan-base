@@ -27,20 +27,19 @@ class DeviceToolRegistry(
     context: Context,
     private val onExecute: (DeviceToolCall) -> Unit = {},
 ) : RemoteToolRegistry {
-    private val appContext = context.applicationContext
+    private data class RemoteBinding(
+        val tools: Map<String, ToolDefinition>,
+        val functionExecutor: ToolExecutor?,
+        val mcpExecutor: ToolExecutor?,
+    )
 
-    @Volatile private var remoteTools: Map<String, ToolDefinition> = emptyMap()
-    @Volatile private var remoteExecutor: ToolExecutor? = null
-    @Volatile private var mcpExecutor: ToolExecutor? = null
+    class Snapshot internal constructor(
+        val definitions: List<ToolDefinition>,
+        private val executeTool: suspend (DeviceToolCall) -> String,
+    ) {
+        val supportedNames: Set<String> = definitions.mapTo(linkedSetOf()) { it.name }
 
-    override val definitions: List<ToolDefinition>
-        get() = BUILT_INS + remoteTools.values
-
-    val supportedNames: Set<String>
-        get() = definitions.mapTo(linkedSetOf()) { it.name }
-
-    val prompt: String
-        get() = buildString {
+        val prompt: String = buildString {
             appendLine("必要な場合に限り、次のツールを使用できます。")
             definitions.forEach { tool ->
                 append("- ").append(tool.name).append(": ").append(tool.description)
@@ -56,6 +55,28 @@ class DeviceToolRegistry(
             append("引数がない場合はparameterを省略してください。ツール結果後はタグを含めず日本語で回答してください。")
         }
 
+        suspend fun execute(call: DeviceToolCall): String = executeTool(call)
+    }
+
+    private val appContext = context.applicationContext
+
+    @Volatile
+    private var remoteBinding = RemoteBinding(emptyMap(), null, null)
+
+    override val definitions: List<ToolDefinition>
+        get() = snapshot().definitions
+
+    val supportedNames: Set<String>
+        get() = snapshot().supportedNames
+
+    val prompt: String
+        get() = snapshot().prompt
+
+    fun snapshot(): Snapshot {
+        val binding = remoteBinding
+        return Snapshot(BUILT_INS + binding.tools.values) { call -> execute(call, binding) }
+    }
+
     override fun installRemoteTools(
         tools: List<ToolDefinition>,
         functionExecutor: ToolExecutor,
@@ -63,25 +84,24 @@ class DeviceToolRegistry(
     ) {
         val names = BUILT_INS.mapTo(mutableSetOf()) { it.name }
         require(tools.all { names.add(it.name) }) { "ツール名が重複しています" }
-        remoteTools = tools.associateBy { it.name }
-        remoteExecutor = functionExecutor
-        mcpExecutor = mcpToolExecutor
+        remoteBinding = RemoteBinding(tools.associateBy { it.name }, functionExecutor, mcpToolExecutor)
     }
 
     override fun clearRemoteTools() {
-        remoteTools = emptyMap()
-        remoteExecutor = null
-        mcpExecutor = null
+        remoteBinding = RemoteBinding(emptyMap(), null, null)
     }
 
-    suspend fun execute(call: DeviceToolCall): String {
+    suspend fun execute(call: DeviceToolCall): String = snapshot().execute(call)
+
+    private suspend fun execute(call: DeviceToolCall, binding: RemoteBinding): String {
         onExecute(call)
         return when (call.name) {
             CURRENT_DATETIME -> currentDateTime()
             BATTERY_STATUS -> batteryStatus()
-            else -> when (remoteTools[call.name]) {
-                is ToolDefinition.Function -> requireNotNull(remoteExecutor) { "function実行器がありません" }.execute(call)
-                is ToolDefinition.Mcp -> requireNotNull(mcpExecutor) { "MCP実行器がありません" }.execute(call)
+            else -> when (binding.tools[call.name]) {
+                is ToolDefinition.Function ->
+                    requireNotNull(binding.functionExecutor) { "function実行器がありません" }.execute(call)
+                is ToolDefinition.Mcp -> requireNotNull(binding.mcpExecutor) { "MCP実行器がありません" }.execute(call)
                 null -> "{\"error\":\"未対応のツールです\"}"
             }
         }

@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { delay } from './async.js'
 import { ApprovalManager } from './approval/manager.js'
+import { assertVoiceEffectAvailable } from './audio/voice-effect.js'
 import { CodexAppServer } from './codex/app-server.js'
 import {
   connectCodexDaemon,
@@ -19,6 +20,7 @@ import {
   STACKCHAN_DYNAMIC_TOOLS,
   StackChanToolHandler,
 } from './tools/stackchan.js'
+import { TaskActivityManager } from './task/activity-manager.js'
 import { UsbStackChanDevice } from './usb/device.js'
 import type { LoadedWorkspace } from './workspace.js'
 
@@ -27,6 +29,7 @@ export type ApplicationOptions = ApplicationRunOptions & {
 }
 
 export async function runApplication(options: ApplicationOptions, signal: AbortSignal): Promise<void> {
+  await assertVoiceEffectAvailable(options.workspace.session.voiceEffect)
   let threadId: string | undefined
   const usbBackoff = new ExponentialRetryBackoff()
 
@@ -48,7 +51,12 @@ export async function runApplication(options: ApplicationOptions, signal: AbortS
       controller = new ConversationSessionController(
         device,
         options.workspace.session.voice,
-        { realtimePrompt: options.workspace.realtimePrompt },
+        {
+          realtimePrompt: options.workspace.realtimePrompt,
+          ...(options.workspace.session.voiceEffect
+            ? { voiceEffect: options.workspace.session.voiceEffect }
+            : {}),
+        },
       )
       if (options.startImmediately) await controller.activate()
 
@@ -58,13 +66,23 @@ export async function runApplication(options: ApplicationOptions, signal: AbortS
         let daemon: CodexDaemonConnection | undefined
         let appServer: CodexAppServer | undefined
         let approvalManager: ApprovalManager | undefined
+        let taskActivityManager: TaskActivityManager | undefined
         let toolHandler: StackChanToolHandler | undefined
         let onServerRequest: ((request: RpcServerRequest) => void) | undefined
         let onNotification: ((notification: RpcNotification) => void) | undefined
+        let onTaskNotification: ((notification: RpcNotification) => void) | undefined
         let terminalFailure = false
         try {
           daemon = await connectCodexDaemon(options.socketPath, signal)
           appServer = new CodexAppServer(daemon.connection)
+          taskActivityManager = new TaskActivityManager(device)
+          const taskActivity = taskActivityManager
+          onTaskNotification = (notification) => {
+            void taskActivity.handleNotification(notification).catch((error) => {
+              console.error(`タスク状態notificationの処理に失敗: ${errorMessage(error)}`)
+            })
+          }
+          appServer.on('notification', onTaskNotification)
           const initialized = await appServer.initialize()
           console.log(`Codex app-server接続: ${initialized.userAgent}`)
           const voices = await appServer.listRealtimeVoices()
@@ -77,11 +95,13 @@ export async function runApplication(options: ApplicationOptions, signal: AbortS
               `Realtime v3 voice "${options.workspace.session.voice}" はapp-serverで利用できません`,
             )
           }
-          threadId = await appServer.openThread({
+          const thread = await appServer.openThread({
             cwd: options.workspace.root,
             ...(threadId ? { threadId } : {}),
             ...(!threadId ? { dynamicTools: STACKCHAN_DYNAMIC_TOOLS } : {}),
           })
+          threadId = thread.id
+          await taskActivity.bindThread(thread.id, thread.status)
           console.log(`Codex thread: ${threadId}`)
 
           approvalManager = new ApprovalManager(daemon.connection, threadId)
@@ -91,6 +111,7 @@ export async function runApplication(options: ApplicationOptions, signal: AbortS
             () => ({
               connected: device.connected,
               conversationState: controller!.state,
+              taskState: taskActivity.state,
               desired: controller!.desired,
             }),
           )
@@ -140,11 +161,15 @@ export async function runApplication(options: ApplicationOptions, signal: AbortS
           if (appServer && onNotification) {
             appServer.off('notification', onNotification)
           }
+          if (appServer && onTaskNotification) {
+            appServer.off('notification', onTaskNotification)
+          }
           if (approvalManager) {
             if (signal.aborted || terminalFailure) await approvalManager.declineAll()
             else await approvalManager.suspendDeviceViews()
             approvalManager.unbindDevice(device)
           }
+          await taskActivityManager?.close()
           await daemon?.close()
         }
 

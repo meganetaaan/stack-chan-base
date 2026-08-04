@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { SerialPort } from 'serialport'
 import { AsyncQueue, Deferred, abortError, delay, throwIfAborted } from '../async.js'
 import type {
@@ -7,6 +8,7 @@ import type {
   DeviceCapabilities,
   PcmChunk,
   StackChanDevice,
+  TaskExecutionState,
 } from '../types.js'
 import {
   approvalRequestEvent,
@@ -16,6 +18,7 @@ import {
   STACKCHAN_EVENT_SCHEMA,
   type ApprovalResolvedEvent,
   type ApprovalSuspendedEvent,
+  taskStatusEvent,
 } from './events.js'
 import {
   encodeStackChanFrame,
@@ -389,6 +392,13 @@ export class UsbStackChanDevice implements StackChanDevice {
                 ? 5
                 : 0
     await this.#sendControl(StackChanControl.STATUS, 0, Uint8Array.of(wireValue), 0)
+  }
+
+  async setTaskState(state: TaskExecutionState): Promise<void> {
+    if (!this.#connected) return
+    await this.#sendSerializedEvent(
+      JSON.stringify(taskStatusEvent(`task-${randomUUID()}`, state)),
+    )
   }
 
   onConversationRequest(listener: (request: ConversationRequestEvent) => void): () => void {

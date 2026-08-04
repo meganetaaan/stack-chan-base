@@ -37,6 +37,8 @@ class FakeDevice implements StackChanDevice {
 
   async setConversationState(_state: ConversationState): Promise<void> {}
 
+  async setTaskState(): Promise<void> {}
+
   onConversationRequest(
     _listener: (request: ConversationRequestEvent) => void,
   ): () => void {

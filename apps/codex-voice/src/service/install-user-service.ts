@@ -6,11 +6,13 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+import { assertVoiceEffectAvailable } from '../audio/voice-effect.js'
 import {
   deviceSelectionPath,
   writeSelectedDeviceId,
 } from '../device-selection.js'
 import { isNodeError, runSystemctl } from '../node-utils.js'
+import { NonRetryableError } from '../retry-policy.js'
 import { discoverStackChanDeviceId } from '../usb/device.js'
 import {
   buildStackChanUserServiceUnit,
@@ -39,12 +41,9 @@ async function main(): Promise<void> {
     return
   }
 
-  const workspace = await loadActiveWorkspace()
-  const portPath = parsed.values.port ?? '/dev/ttyACM0'
   const unitName = validateSystemdUnitName(
     parsed.values['unit-name'] ?? DEFAULT_UNIT_NAME,
   )
-  const deviceId = await discoverStackChanDeviceId(portPath)
   const selectionPath = deviceSelectionPath()
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url))
   await access(cliPath, constants.R_OK)
@@ -61,6 +60,11 @@ async function main(): Promise<void> {
     process.stdout.write(unit)
     return
   }
+
+  const workspace = await loadActiveWorkspace()
+  await assertVoiceEffectAvailable(workspace.session.voiceEffect)
+  const portPath = parsed.values.port ?? '/dev/ttyACM0'
+  const deviceId = await discoverStackChanDeviceId(portPath)
 
   const configHome =
     process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.length > 0
@@ -110,5 +114,5 @@ Options:
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error))
-  process.exitCode = 1
+  process.exitCode = error instanceof NonRetryableError ? 78 : 1
 })

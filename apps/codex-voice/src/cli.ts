@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { runApplication } from './application.js'
+import { assertVoiceEffectAvailable } from './audio/voice-effect.js'
 import { CLI_HELP, parseCliCommand } from './cli-options.js'
 import { CodexAppServer } from './codex/app-server.js'
 import { connectCodexDaemon } from './codex/rpc.js'
@@ -32,6 +33,7 @@ import {
   readActiveWorkspace,
   setActiveWorkspace,
   setWorkspaceVoice,
+  setWorkspaceVoiceEffect,
   workspaceSummary,
 } from './workspace.js'
 
@@ -61,7 +63,10 @@ async function main(): Promise<void> {
     if (!hasSkill) {
       console.warn(`警告: workspace skillがありません: .agents/skills/stackchan/SKILL.md`)
     }
-    if (command.kind === 'config-validate') console.log('workspace設定は有効です')
+    if (command.kind === 'config-validate') {
+      await assertVoiceEffectAvailable(workspace.session.voiceEffect)
+      console.log('workspace設定と音声加工環境は有効です')
+    }
     return
   }
   if (command.kind === 'config-set-voice' || command.kind === 'config-unset-voice') {
@@ -73,12 +78,28 @@ async function main(): Promise<void> {
     console.log('設定を保存しました。稼働中serviceへの反映にはworkspace applyを実行してください。')
     return
   }
+  if (
+    command.kind === 'config-set-voice-effect' ||
+    command.kind === 'config-unset-voice-effect'
+  ) {
+    const workspace = await setWorkspaceVoiceEffect(
+      command.workspacePath,
+      command.kind === 'config-set-voice-effect'
+        ? command.voiceEffect
+        : undefined,
+    )
+    console.log(workspaceSummary(workspace))
+    console.log('設定を保存しました。稼働中serviceへの反映にはworkspace applyを実行してください。')
+    return
+  }
   if (command.kind === 'workspace-current') {
     const workspace = await loadWorkspace(await readActiveWorkspace())
     console.log(workspaceSummary(workspace))
     return
   }
   if (command.kind === 'workspace-use') {
+    const candidate = await loadWorkspace(command.workspacePath)
+    await assertVoiceEffectAvailable(candidate.session.voiceEffect)
     const workspace = await setActiveWorkspace(command.workspacePath)
     console.log(`アクティブworkspaceを変更しました: ${workspace.root}`)
     if ((await queryUserServiceStatus(DEFAULT_VOICE_UNIT_NAME)).active) {
@@ -91,6 +112,7 @@ async function main(): Promise<void> {
   }
   if (command.kind === 'workspace-apply') {
     const workspace = await loadActiveWorkspace()
+    await assertVoiceEffectAvailable(workspace.session.voiceEffect)
     await restartUserService(DEFAULT_VOICE_UNIT_NAME)
     console.log(`workspaceをserviceへ反映しました: ${workspace.root}`)
     return

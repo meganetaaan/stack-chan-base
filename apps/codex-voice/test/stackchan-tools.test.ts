@@ -18,7 +18,7 @@ test('fixed Stack-chan tool definition exposes a read-only namespaced status too
         {
           type: 'function',
           name: 'get_status',
-          description: 'USB接続状態と現在の会話状態を取得する。状態は変更しない。',
+          description: 'USB接続状態、会話状態、タスク実行状態を取得する。状態は変更しない。',
           inputSchema: {
             type: 'object',
             properties: {},
@@ -36,6 +36,7 @@ test('stackchan.get_status returns current device and conversation state', async
   const handler = new StackChanToolHandler(rpc, 'thread-1', () => ({
     connected: true,
     conversationState: 'listening',
+    taskState: 'running',
     desired: true,
   }))
   const response = once(output, 'data')
@@ -59,7 +60,7 @@ test('stackchan.get_status returns current device and conversation state', async
       contentItems: [
         {
           type: 'inputText',
-          text: '{"connected":true,"conversationState":"listening","desired":true}',
+          text: '{"connected":true,"conversationState":"listening","taskState":"running","desired":true}',
         },
       ],
     },
@@ -104,6 +105,7 @@ for (const testCase of [
     const handler = new StackChanToolHandler(rpc, 'thread-1', () => ({
       connected: true,
       conversationState: 'standby',
+      taskState: 'idle',
       desired: false,
     }))
     const response = once(output, 'data')

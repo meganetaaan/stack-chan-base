@@ -121,6 +121,44 @@ test('config commands resolve workspace paths and support voice changes', () => 
       workspacePath: '/tmp/session',
     },
   )
+  assert.deepEqual(
+    parseCliCommand([
+      'config',
+      'set',
+      'voice-effect',
+      'cute',
+      '--workspace',
+      '/tmp/session',
+    ]),
+    {
+      kind: 'config-set-voice-effect',
+      workspacePath: '/tmp/session',
+      voiceEffect: 'cute',
+    },
+  )
+  assert.deepEqual(
+    parseCliCommand([
+      'config',
+      'unset',
+      'voice-effect',
+      '--workspace',
+      '/tmp/session',
+    ]),
+    {
+      kind: 'config-unset-voice-effect',
+      workspacePath: '/tmp/session',
+    },
+  )
+  assert.throws(
+    () =>
+      parseCliCommand([
+        'config',
+        'set',
+        'voice-effect',
+        'robot',
+      ]),
+    /cute/,
+  )
 })
 
 test('workspace and voice commands parse stable public shapes', () => {

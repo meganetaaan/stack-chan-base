@@ -15,10 +15,14 @@ const harness = vi.hoisted(() => ({
   openThreadOptions: [] as Array<Record<string, unknown>>,
   controllerPrompts: [] as Array<string | undefined>,
   controllerVoices: [] as Array<string | undefined>,
+  controllerVoiceEffects: [] as Array<string | undefined>,
   suspendCalls: 0,
+  taskStates: [] as string[],
   usbCloses: 0,
   usbConnects: 0,
   voices: ['alloy'] as string[],
+  voiceEffectChecks: [] as Array<string | undefined>,
+  voiceEffectError: undefined as Error | undefined,
 }))
 
 vi.mock('../src/async.js', () => ({
@@ -40,6 +44,13 @@ vi.mock('../src/approval/manager.js', () => ({
     async handleServerRequest(): Promise<void> {}
     async handleNotification(): Promise<void> {}
   },
+}))
+
+vi.mock('../src/audio/voice-effect.js', () => ({
+  assertVoiceEffectAvailable: vi.fn(async (voiceEffect: string | undefined) => {
+    harness.voiceEffectChecks.push(voiceEffect)
+    if (harness.voiceEffectError) throw harness.voiceEffectError
+  }),
 }))
 
 vi.mock('../src/codex/rpc.js', () => ({
@@ -112,9 +123,12 @@ vi.mock('../src/codex/app-server.js', () => ({
       }
     }
 
-    async openThread(options: Record<string, unknown>): Promise<string> {
+    async openThread(options: Record<string, unknown>): Promise<{
+      id: string
+      status: { type: 'idle' }
+    }> {
       harness.openThreadOptions.push(options)
-      return this.threadId
+      return { id: this.threadId, status: { type: 'idle' } }
     }
 
     on(): this {
@@ -166,6 +180,10 @@ vi.mock('../src/usb/device.js', () => ({
       if (!this.#closed) this.disconnect()
       harness.usbCloses += 1
     }
+
+    async setTaskState(state: string): Promise<void> {
+      harness.taskStates.push(state)
+    }
   },
 }))
 
@@ -178,11 +196,12 @@ vi.mock('../src/conversation/session-controller.js', () => ({
     constructor(
       device: { disconnect(error?: Error): void },
       voice?: string,
-      options?: { realtimePrompt?: string },
+      options?: { realtimePrompt?: string; voiceEffect?: string },
     ) {
       this.device = device
       harness.controllerVoices.push(voice)
       harness.controllerPrompts.push(options?.realtimePrompt)
+      harness.controllerVoiceEffects.push(options?.voiceEffect)
     }
 
     async activate(): Promise<void> {
@@ -224,7 +243,7 @@ const OPTIONS: ApplicationOptions = {
     realtimePromptPath: '/workspace/.stackchan/realtime-prompt.md',
     realtimePrompt: '日本語で話してください。',
     session: {
-      schemaVersion: 1,
+      schemaVersion: 2,
     },
   },
 }
@@ -242,10 +261,14 @@ describe('application connection supervision', () => {
     harness.openThreadOptions = []
     harness.controllerPrompts = []
     harness.controllerVoices = []
+    harness.controllerVoiceEffects = []
     harness.suspendCalls = 0
+    harness.taskStates = []
     harness.usbCloses = 0
     harness.usbConnects = 0
     harness.voices = ['alloy']
+    harness.voiceEffectChecks = []
+    harness.voiceEffectError = undefined
     vi.spyOn(console, 'log').mockImplementation(() => undefined)
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
   })
@@ -259,6 +282,9 @@ describe('application connection supervision', () => {
     expect(harness.controllerAttachments).toBe(1)
     expect(harness.controllerPrompts).toEqual(['日本語で話してください。'])
     expect(harness.controllerVoices).toEqual([undefined])
+    expect(harness.controllerVoiceEffects).toEqual([undefined])
+    expect(harness.voiceEffectChecks).toEqual([undefined])
+    expect(harness.taskStates).toEqual(['idle'])
     expect(harness.openThreadOptions[0]).toMatchObject({
       cwd: '/workspace',
       dynamicTools: [
@@ -304,6 +330,49 @@ describe('application connection supervision', () => {
     expect(harness.controllerAttachments).toBe(0)
     expect(harness.delayCalls).toEqual([])
     expect(harness.usbCloses).toBe(1)
+  })
+
+  it('validates and forwards the configured voice effect before opening USB', async () => {
+    harness.controllerOutcomes = ['finish']
+    const options: ApplicationOptions = {
+      ...OPTIONS,
+      workspace: {
+        ...OPTIONS.workspace,
+        session: {
+          schemaVersion: 2,
+          voiceEffect: 'cute',
+        },
+      },
+    }
+
+    await runApplication(options, harness.abortController!.signal)
+
+    expect(harness.voiceEffectChecks).toEqual(['cute'])
+    expect(harness.controllerVoiceEffects).toEqual(['cute'])
+    expect(harness.usbConnects).toBe(1)
+  })
+
+  it('does not open USB when the configured voice effect runtime is unavailable', async () => {
+    harness.voiceEffectError = new Error('rubberband is unavailable')
+
+    await expect(
+      runApplication(
+        {
+          ...OPTIONS,
+          workspace: {
+            ...OPTIONS.workspace,
+            session: {
+              schemaVersion: 2,
+              voiceEffect: 'cute',
+            },
+          },
+        },
+        harness.abortController!.signal,
+      ),
+    ).rejects.toThrow('rubberband is unavailable')
+
+    expect(harness.voiceEffectChecks).toEqual(['cute'])
+    expect(harness.usbConnects).toBe(0)
   })
 
   it('reconnects app-server without reopening USB', async () => {

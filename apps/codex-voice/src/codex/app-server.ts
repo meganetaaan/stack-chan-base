@@ -3,6 +3,10 @@ import { Deferred } from '../async.js'
 import { NonRetryableError } from '../retry-policy.js'
 import type { RpcNotification, RpcServerRequest } from './rpc.js'
 import { JsonLineRpcConnection } from './rpc.js'
+import {
+  isAppServerThreadStatus,
+  type AppServerThreadStatus,
+} from './thread-status.js'
 
 const REALTIME_SDP_TIMEOUT_MS = 30_000
 
@@ -40,9 +44,15 @@ export type DynamicToolSpec =
       }>
     }
 
+export type AppServerThread = {
+  id: string
+  status: AppServerThreadStatus
+}
+
 type ThreadResponse = {
   thread: {
     id: string
+    status: unknown
   }
 }
 
@@ -90,7 +100,7 @@ export class CodexAppServer extends EventEmitter {
     return response
   }
 
-  async openThread(options: AppServerThreadOptions): Promise<string> {
+  async openThread(options: AppServerThreadOptions): Promise<AppServerThread> {
     if (!this.#initialized) throw new Error('app-server must be initialized first')
     const common = {
       cwd: options.cwd,
@@ -113,11 +123,19 @@ export class CodexAppServer extends EventEmitter {
           ...common,
           ...(options.dynamicTools ? { dynamicTools: options.dynamicTools } : {}),
         })
-    if (!isRecord(response) || !isRecord(response.thread) || typeof response.thread.id !== 'string') {
+    if (
+      !isRecord(response) ||
+      !isRecord(response.thread) ||
+      typeof response.thread.id !== 'string' ||
+      !isAppServerThreadStatus(response.thread.status)
+    ) {
       throw new NonRetryableError('protocol', 'app-server returned an invalid thread response')
     }
     this.#threadId = response.thread.id
-    return response.thread.id
+    return {
+      id: response.thread.id,
+      status: response.thread.status,
+    }
   }
 
   async listRealtimeVoices(): Promise<{

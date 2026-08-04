@@ -11,6 +11,7 @@ import jp.stackchan.localvoicepoc.serial.StackChanEventEncoder
 import jp.stackchan.localvoicepoc.serial.StackChanFrame
 import jp.stackchan.localvoicepoc.serial.StackChanUsbState
 import jp.stackchan.localvoicepoc.serial.StackChanUsbTransport
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -171,7 +172,11 @@ class RealtimeSessionControllerTest {
         transport.receive(
             """{"type":"session.update","event_id":"tools","session":{"tools":[{"type":"function","name":"remote","description":"","parameters":{"type":"object","properties":{}}}]}}""",
         )
-        await { registry.functionExecutor != null }
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "tools"
+            }
+        }
         val executor = requireNotNull(registry.functionExecutor)
 
         val registered = async {
@@ -192,6 +197,454 @@ class RealtimeSessionControllerTest {
         assertTrue(registeredFailure is IllegalStateException)
         assertTrue(lateFailure is IllegalStateException)
         controller.close()
+    }
+
+    @Test
+    fun rejectsToolCallsFromAResponseThatStartedBeforeTheProviderUpdate() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val retiredExecutor = requireNotNull(registry.functionExecutor)
+
+        transport.receive(remoteToolUpdate("provider-b"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        val currentExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+
+        val retiredFailure = runCatching {
+            retiredExecutor.execute(DeviceToolCall("remote"))
+        }.exceptionOrNull()
+        assertTrue(retiredFailure is IllegalStateException)
+        assertTrue(transport.payloads().none { it.type() == "response.function_call_arguments.done" })
+
+        val currentResult = async { currentExecutor.execute(DeviceToolCall("remote")) }
+        await {
+            transport.payloads().any { it.type() == "response.function_call_arguments.done" }
+        }
+        val functionCall = transport.payloads().last { it.type() == "response.function_call_arguments.done" }
+        assertEquals("provider-b", functionCall.getValue("stackchan_session_update_id").jsonPrimitive.content)
+        val callId = functionCall.getValue("call_id").jsonPrimitive.content
+        transport.receive(
+            """{"type":"conversation.item.create","event_id":"output","item":{"type":"function_call_output","call_id":"$callId","output":"current"}}""",
+        )
+
+        assertEquals("current", withTimeout(500) { currentResult.await() })
+        controller.close()
+    }
+
+    @Test
+    fun retriesTheActiveProviderAnnouncementAfterAWriteFailure() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.clearSent()
+        transport.failNextWrites = 1
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        withTimeout(500) { transport.failedWriteAttempted.await() }
+        val executor = requireNotNull(registry.functionExecutor)
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        transport.clearSent()
+
+        val result = async { executor.execute(DeviceToolCall("remote")) }
+        await { transport.payloads().any { it.type() == "response.function_call_arguments.done" } }
+        val callId = transport.payloads()
+            .last { it.type() == "response.function_call_arguments.done" }
+            .getValue("call_id").jsonPrimitive.content
+        transport.receive(
+            """{"type":"conversation.item.create","event_id":"output","item":{"type":"function_call_output","call_id":"$callId","output":"recovered"}}""",
+        )
+
+        assertEquals("recovered", withTimeout(500) { result.await() })
+        controller.close()
+    }
+
+    @Test
+    fun doesNotEmitRemoteCallsBeforeTheProviderAcknowledgementIsWritten() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.clearSent()
+        transport.blockNextWrite()
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        withTimeout(500) { transport.blockedWriteAttempted.await() }
+        val executor = requireNotNull(registry.functionExecutor)
+        val result = async { executor.execute(DeviceToolCall("remote")) }
+        delay(20)
+        assertTrue(transport.payloads().none { it.type()?.startsWith("response.") == true })
+
+        transport.releaseBlockedWrite()
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        await { transport.payloads().any { it.type() == "response.function_call_arguments.done" } }
+        val payloads = transport.payloads()
+        val updateIndex = payloads.indexOfFirst { it.type() == "session.updated" }
+        val callIndex = payloads.indexOfFirst { it.type() == "response.function_call_arguments.done" }
+        assertTrue(updateIndex >= 0)
+        assertTrue(updateIndex < callIndex)
+        val callId = payloads[callIndex].getValue("call_id").jsonPrimitive.content
+        transport.receive(
+            """{"type":"conversation.item.create","event_id":"output","item":{"type":"function_call_output","call_id":"$callId","output":"acknowledged"}}""",
+        )
+
+        assertEquals("acknowledged", withTimeout(500) { result.await() })
+        controller.close()
+    }
+
+    @Test
+    fun retriesTheCurrentUpdateIdempotentlyAndRejectsARetiredUpdateId() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val providerAExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        assertTrue(providerAExecutor === registry.functionExecutor)
+
+        transport.receive(remoteToolUpdate("provider-b"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        val providerBExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "error" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+
+        assertTrue(providerBExecutor === registry.functionExecutor)
+        assertTrue(
+            transport.payloads().none {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            },
+        )
+        controller.close()
+    }
+
+    @Test
+    fun serializesAProviderUpdateAfterAnAlreadyStartedFunctionEmission() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(remoteToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val retiredExecutor = requireNotNull(registry.functionExecutor)
+        transport.clearSent()
+        transport.blockNextWrite()
+
+        val retiredResult = async {
+            runCatching { retiredExecutor.execute(DeviceToolCall("remote")) }.exceptionOrNull()
+        }
+        withTimeout(500) { transport.blockedWriteAttempted.await() }
+        transport.receive(remoteToolUpdate("provider-b"))
+        delay(20)
+        assertTrue(
+            transport.payloads().none {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            },
+        )
+
+        transport.releaseBlockedWrite()
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+
+        val payloads = transport.payloads()
+        val argumentsIndex = payloads.indexOfFirst { it.type() == "response.function_call_arguments.done" }
+        val updateIndex = payloads.indexOfFirst {
+            it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+        }
+        assertTrue(argumentsIndex >= 0)
+        assertTrue(argumentsIndex < updateIndex)
+        assertTrue(withTimeout(500) { retiredResult.await() } != null)
+        controller.close()
+    }
+
+    @Test
+    fun cancelsAnMcpOperationWhenItsProviderGenerationIsRetired() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = BlockingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val retiredExecutor = requireNotNull(registry.mcpExecutor)
+
+        val retiredResult = async {
+            runCatching { retiredExecutor.execute(DeviceToolCall("mcp__test__write")) }.exceptionOrNull()
+        }
+        withTimeout(500) { mcp.executionStarted.await() }
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-b","session":{"instructions":"updated"}}""",
+        )
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        mcp.releaseExecution.complete(Unit)
+
+        assertTrue(withTimeout(500) { retiredResult.await() } is IllegalStateException)
+        assertEquals(0, mcp.sideEffects)
+        val currentExecutor = requireNotNull(registry.mcpExecutor)
+        assertEquals("executed", currentExecutor.execute(DeviceToolCall("mcp__test__write")))
+        assertEquals(1, mcp.sideEffects)
+        controller.close()
+    }
+
+    @Test
+    fun serializesAnMcpDispatchBeforeTheProviderUpdateAcknowledgement() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = BlockingDispatchMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val executor = requireNotNull(registry.mcpExecutor)
+        transport.clearSent()
+
+        val result = async { executor.execute(DeviceToolCall("mcp__test__write")) }
+        withTimeout(500) { mcp.dispatchStarted.await() }
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-b","session":{"instructions":"updated"}}""",
+        )
+        delay(20)
+        assertTrue(
+            transport.payloads().none {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            },
+        )
+
+        mcp.releaseDispatch.complete(Unit)
+        assertEquals("executed", withTimeout(500) { result.await() })
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        assertEquals(1, mcp.sideEffects)
+        controller.close()
+    }
+
+    @Test
+    fun preservesCallerCancellationForACurrentProviderOperation() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = BlockingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val executor = requireNotNull(registry.mcpExecutor)
+
+        val operation = async { executor.execute(DeviceToolCall("mcp__test__write")) }
+        withTimeout(500) { mcp.executionStarted.await() }
+        operation.cancel()
+        val failure = runCatching { operation.await() }.exceptionOrNull()
+
+        assertTrue(failure is CancellationException)
+        assertEquals(0, mcp.sideEffects)
+        controller.close()
+    }
+
+    @Test
+    fun retainsAnMcpCatalogForInstructionsOnlyUpdatesAndClosesItWhenToolsAreRemoved() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = TrackingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val catalog = mcp.catalogs.single()
+
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-b","session":{"instructions":"updated"}}""",
+        )
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+        assertEquals(1, mcp.catalogs.size)
+        assertEquals(0, catalog.closeCalls)
+        assertEquals("catalog-0", requireNotNull(registry.mcpExecutor).execute(DeviceToolCall("mcp__test__write")))
+
+        transport.receive(
+            """{"type":"session.update","event_id":"provider-c","session":{"tools":[]}}""",
+        )
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-c"
+            }
+        }
+        assertEquals(1, catalog.closeCalls)
+        assertTrue(registry.definitions.none { it is ToolDefinition.Mcp })
+        controller.close()
+    }
+
+    @Test
+    fun rollsBackAPreparedMcpCatalogWhenTheProviderCommitFails() = runBlocking {
+        val transport = FakeUsbTransport(StackChanCapabilities.ALL)
+        val registry = FakeRegistry()
+        val mcp = TrackingMcp()
+        val controller = controller(
+            transport = transport,
+            commands = FakeConversationCommands(),
+            scope = this,
+            registry = registry,
+            mcp = mcp,
+        )
+        controller.start()
+        await { transport.payloads().any { it.type() == "session.created" } }
+        transport.receive(mcpToolUpdate("provider-a"))
+        await {
+            transport.payloads().any {
+                it.type() == "session.updated" && it["event_id"]?.jsonPrimitive?.content == "provider-a"
+            }
+        }
+        val committedCatalog = mcp.catalogs.single()
+        val committedExecutor = requireNotNull(registry.mcpExecutor)
+        registry.failNextInstall = true
+
+        transport.receive(mcpToolUpdate("provider-b"))
+        await {
+            transport.payloads().any {
+                it.type() == "error" && it["event_id"]?.jsonPrimitive?.content == "provider-b"
+            }
+        }
+
+        assertEquals(2, mcp.catalogs.size)
+        assertEquals(0, committedCatalog.closeCalls)
+        assertEquals(1, mcp.catalogs[1].closeCalls)
+        assertTrue(committedExecutor === registry.mcpExecutor)
+        assertEquals("catalog-0", committedExecutor.execute(DeviceToolCall("mcp__test__write")))
+        controller.close()
+        assertEquals(1, committedCatalog.closeCalls)
     }
 
     @Test
@@ -248,11 +701,12 @@ class RealtimeSessionControllerTest {
         commands: ConversationCommandHandler,
         scope: kotlinx.coroutines.CoroutineScope,
         registry: RemoteToolRegistry = FakeRegistry(),
+        mcp: McpToolProvider = FakeMcp(),
         monotonicTimeMilliseconds: () -> Long = { System.nanoTime() / 1_000_000L },
     ) = RealtimeSessionController(
         transport = transport,
         registry = registry,
-        mcp = FakeMcp(),
+        mcp = mcp,
         conversationCommands = commands,
         scope = scope,
         monotonicTimeMilliseconds = monotonicTimeMilliseconds,
@@ -270,6 +724,12 @@ class RealtimeSessionControllerTest {
     private fun stopRequest(requestId: String): String =
         """{"schema":"stackchan.event.v1","type":"conversation.stop","requestId":"$requestId","source":"headTouch","gesture":"backwardSwipe"}"""
 
+    private fun remoteToolUpdate(eventId: String): String =
+        """{"type":"session.update","event_id":"$eventId","session":{"tools":[{"type":"function","name":"remote","description":"","parameters":{"type":"object","properties":{}}}]}}"""
+
+    private fun mcpToolUpdate(eventId: String): String =
+        """{"type":"session.update","event_id":"$eventId","session":{"tools":[{"type":"mcp","server_label":"test","connector_id":"profile","require_approval":"always"}]}}"""
+
     private class FakeConversationCommands : ConversationCommandHandler {
         var startCalls = 0
         var stopCalls = 0
@@ -286,27 +746,128 @@ class RealtimeSessionControllerTest {
     }
 
     private class FakeRegistry : RemoteToolRegistry {
-        override val definitions: List<ToolDefinition> = emptyList()
+        @Volatile private var installedDefinitions: List<ToolDefinition> = emptyList()
+        override val definitions: List<ToolDefinition> get() = installedDefinitions
         @Volatile var functionExecutor: ToolExecutor? = null
+        @Volatile var mcpExecutor: ToolExecutor? = null
         @Volatile var clearCalls = 0
+        @Volatile var failNextInstall = false
 
         override fun installRemoteTools(
             tools: List<ToolDefinition>,
             functionExecutor: ToolExecutor,
             mcpToolExecutor: ToolExecutor,
         ) {
+            if (failNextInstall) {
+                failNextInstall = false
+                error("simulated registry commit failure")
+            }
+            installedDefinitions = tools
             this.functionExecutor = functionExecutor
+            this.mcpExecutor = mcpToolExecutor
         }
 
         override fun clearRemoteTools() {
             clearCalls += 1
+            installedDefinitions = emptyList()
             functionExecutor = null
+            mcpExecutor = null
         }
     }
 
     private class FakeMcp : McpToolProvider {
-        override suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp> = emptyList()
-        override suspend fun execute(call: DeviceToolCall): String = ""
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog = object : McpToolCatalog {
+            override val definitions: List<ToolDefinition.Mcp> = emptyList()
+            override suspend fun prepare(call: DeviceToolCall) = McpToolExecution { "" }
+        }
+    }
+
+    private class BlockingMcp : McpToolProvider {
+        val executionStarted = CompletableDeferred<Unit>()
+        val releaseExecution = CompletableDeferred<Unit>()
+        var sideEffects = 0
+
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog = object : McpToolCatalog {
+            override val definitions = listOf(
+                ToolDefinition.Mcp(
+                    serverLabel = request.serverLabel,
+                    toolName = "write",
+                    name = "mcp__test__write",
+                    description = "",
+                    parameters = JsonObject(emptyMap()),
+                ),
+            )
+
+            override suspend fun prepare(call: DeviceToolCall): McpToolExecution {
+                executionStarted.complete(Unit)
+                releaseExecution.await()
+                return McpToolExecution {
+                    sideEffects += 1
+                    "executed"
+                }
+            }
+        }
+    }
+
+    private class TrackingMcp : McpToolProvider {
+        val catalogs = mutableListOf<TrackingCatalog>()
+
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog =
+            TrackingCatalog(request, catalogs.size).also(catalogs::add)
+
+        inner class TrackingCatalog(
+            request: McpServerRequest,
+            private val index: Int,
+        ) : McpToolCatalog {
+            var closeCalls = 0
+                private set
+            private var closed = false
+            override val definitions = listOf(
+                ToolDefinition.Mcp(
+                    serverLabel = request.serverLabel,
+                    toolName = "write",
+                    name = "mcp__${request.serverLabel}__write",
+                    description = "",
+                    parameters = JsonObject(emptyMap()),
+                ),
+            )
+
+            override suspend fun prepare(call: DeviceToolCall) = McpToolExecution {
+                check(!closed) { "catalog is closed" }
+                "catalog-$index"
+            }
+
+            override fun close() {
+                if (closed) return
+                closed = true
+                closeCalls += 1
+            }
+        }
+    }
+
+    private class BlockingDispatchMcp : McpToolProvider {
+        val dispatchStarted = CompletableDeferred<Unit>()
+        val releaseDispatch = CompletableDeferred<Unit>()
+        var sideEffects = 0
+
+        override suspend fun openCatalog(request: McpServerRequest): McpToolCatalog = object : McpToolCatalog {
+            override val definitions = listOf(
+                ToolDefinition.Mcp(
+                    serverLabel = request.serverLabel,
+                    toolName = "write",
+                    name = "mcp__test__write",
+                    description = "",
+                    parameters = JsonObject(emptyMap()),
+                ),
+            )
+
+            override suspend fun prepare(call: DeviceToolCall) = McpToolExecution {
+                dispatchStarted.complete(Unit)
+                releaseDispatch.await()
+                sideEffects += 1
+                "executed"
+            }
+        }
     }
 
     private class FakeUsbTransport(capabilities: Int) : StackChanUsbTransport {
@@ -321,12 +882,21 @@ class RealtimeSessionControllerTest {
         override val frames = mutableFrames
         var failNextWrites = 0
         val failedWriteAttempted = CompletableDeferred<Unit>()
+        var blockedWriteAttempted = CompletableDeferred<Unit>()
+            private set
+        private var blockNextWrite = false
+        private var releaseBlockedWrite = CompletableDeferred(Unit)
 
         override suspend fun send(frame: StackChanFrame) {
             if (failNextWrites > 0) {
                 failNextWrites -= 1
                 failedWriteAttempted.complete(Unit)
                 throw IOException("simulated write failure")
+            }
+            if (blockNextWrite) {
+                blockNextWrite = false
+                blockedWriteAttempted.complete(Unit)
+                releaseBlockedWrite.await()
             }
             sent += frame
         }
@@ -347,6 +917,17 @@ class RealtimeSessionControllerTest {
         }
 
         fun clearSent() = sent.clear()
+
+        fun blockNextWrite() {
+            check(!blockNextWrite && releaseBlockedWrite.isCompleted) { "a write is already blocked" }
+            blockedWriteAttempted = CompletableDeferred()
+            releaseBlockedWrite = CompletableDeferred()
+            blockNextWrite = true
+        }
+
+        fun releaseBlockedWrite() {
+            releaseBlockedWrite.complete(Unit)
+        }
 
         fun payloads(): List<JsonObject> {
             val decoder = StackChanEventDecoder()

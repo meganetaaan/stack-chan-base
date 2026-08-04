@@ -1,6 +1,11 @@
 import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { createRequire } from 'node:module'
+import {
+  createDecoder,
+  createEncoder,
+  type OpusDecoderHandle,
+  type OpusEncoderHandle,
+} from 'libopus-wasm'
 import {
   MediaStreamTrack,
   RTCPeerConnection,
@@ -20,24 +25,20 @@ export const WEBRTC_AUDIO_FRAME_MILLISECONDS = 20
 
 const WEBRTC_START_TIMEOUT_MS = 30_000
 const WEBRTC_PEER_DISCONNECTED_GRACE_MS = 5_000
+const WEBRTC_AUDIO_BOUNDARY_STALL_MS = 5_000
 const WEBRTC_OPUS_BITRATE = 32_000
 const RTP_PAYLOAD_TYPE_FALLBACK = 111
 const RTP_TALKSPURT_GAP_MS = WEBRTC_AUDIO_FRAME_MILLISECONDS * 3
 const MAX_QUEUED_MICROPHONE_FRAMES = 10
+export const REMOTE_AUDIO_PLAYOUT_DELAY_MS = 120
+const REMOTE_AUDIO_IDLE_TIMEOUT_MS = 2_000
+export const REMOTE_AUDIO_WARNING_INTERVAL_MS = 1_000
+const MAX_CONSECUTIVE_REMOTE_DECODE_FAILURES = 5
+const MAX_REMOTE_TIMESTAMP_GAP_SAMPLES =
+  (WEBRTC_AUDIO_SAMPLE_RATE * REMOTE_AUDIO_IDLE_TIMEOUT_MS) / 1_000
+const MAX_QUEUED_REMOTE_PACKETS = 500
 const WEBRTC_SILENCE_FRAME = new Int16Array(WEBRTC_AUDIO_FRAME_SAMPLES)
-
-type OpusEncoderInstance = {
-  encode(buffer: Buffer): Buffer
-  decode(buffer: Buffer): Buffer
-  setBitrate(bitrate: number): void
-}
-
-type OpusModule = {
-  OpusEncoder: new (sampleRate: number, channels: number) => OpusEncoderInstance
-}
-
-const require = createRequire(import.meta.url)
-const { OpusEncoder } = require('@discordjs/opus') as OpusModule
+const WEBRTC_SILENCE_BYTES = encodePcm16Le(WEBRTC_SILENCE_FRAME)
 
 type WritableRtpTrack = {
   writeRtp(packet: RtpPacket | Buffer): void
@@ -52,6 +53,7 @@ export type OpusRtpAudioSenderScheduler = {
 }
 
 export type OpusRtpAudioSenderOptions = {
+  encoder: Pick<OpusEncoderHandle, 'encode'>
   scheduler?: OpusRtpAudioSenderScheduler
   onError?: (error: Error) => void
   payloadType?: number
@@ -66,7 +68,16 @@ const defaultAudioSenderScheduler: OpusRtpAudioSenderScheduler = {
 type RealtimeWebRtcSessionEvents = {
   event: [event: Record<string, unknown>]
   audio: [chunk: PcmChunk]
+  audioEndDeclared: [turn: RealtimeAudioTurnEnd]
+  audioEnd: [turn: RealtimeAudioTurnEnd]
   close: [error?: Error]
+}
+
+export type RealtimeAudioTurnEnd = {
+  id: string
+  startMilliseconds: number
+  endMilliseconds: number
+  transcript: string
 }
 
 export interface RealtimeAudioSession {
@@ -77,8 +88,12 @@ export interface RealtimeAudioSession {
   close(): Promise<void>
   on(event: 'event', listener: (event: Record<string, unknown>) => void): this
   on(event: 'audio', listener: (chunk: PcmChunk) => void): this
+  on(event: 'audioEndDeclared', listener: (turn: RealtimeAudioTurnEnd) => void): this
+  on(event: 'audioEnd', listener: (turn: RealtimeAudioTurnEnd) => void): this
   off(event: 'event', listener: (event: Record<string, unknown>) => void): this
   off(event: 'audio', listener: (chunk: PcmChunk) => void): this
+  off(event: 'audioEndDeclared', listener: (turn: RealtimeAudioTurnEnd) => void): this
+  off(event: 'audioEnd', listener: (turn: RealtimeAudioTurnEnd) => void): this
 }
 
 export type RealtimeWebRtcSessionOptions = {
@@ -126,7 +141,7 @@ export class Pcm16FrameBuffer {
  */
 export class OpusRtpAudioSender {
   readonly #track: WritableRtpTrack
-  readonly #encoder = new OpusEncoder(WEBRTC_AUDIO_SAMPLE_RATE, 1)
+  readonly #encoder: Pick<OpusEncoderHandle, 'encode'>
   readonly #frames = new Pcm16FrameBuffer()
   readonly #queuedFrames: Int16Array[] = []
   readonly #ssrc = randomUint32()
@@ -144,15 +159,15 @@ export class OpusRtpAudioSender {
   #nextPacketAt = 0
   #running = false
 
-  constructor(track: WritableRtpTrack, options: OpusRtpAudioSenderOptions = {}) {
+  constructor(track: WritableRtpTrack, options: OpusRtpAudioSenderOptions) {
     this.#track = track
+    this.#encoder = options.encoder
     this.#scheduler = options.scheduler ?? defaultAudioSenderScheduler
     this.#onError = options.onError
     this.#payloadType = options.payloadType ?? RTP_PAYLOAD_TYPE_FALLBACK
     if (!Number.isInteger(this.#payloadType) || this.#payloadType < 0 || this.#payloadType > 127) {
       throw new RangeError('RTP payload type must be an integer from 0 through 127')
     }
-    this.#encoder.setBitrate(WEBRTC_OPUS_BITRATE)
   }
 
   start(): void {
@@ -254,7 +269,7 @@ export class OpusRtpAudioSender {
       }
     }
     const marker = this.#marker || (!generatedSilence && this.#markNextMicrophoneFrame)
-    const encoded = this.#encoder.encode(Buffer.from(encodePcm16Le(samples)))
+    const encoded = this.#encoder.encode(samples)
     this.#track.writeRtp(
       new RtpPacket(
         new RtpHeader({
@@ -265,7 +280,7 @@ export class OpusRtpAudioSender {
           ssrc: this.#ssrc,
           marker,
         }),
-        encoded,
+        Buffer.from(encoded),
       ),
     )
     this.#sequenceNumber = (this.#sequenceNumber + 1) & 0xffff
@@ -280,15 +295,727 @@ export class OpusRtpAudioSender {
  * Stateful Opus/RTP -> PCM16 decoder. A mono decoder also downmixes stereo Opus.
  */
 export class OpusRtpAudioDecoder {
-  readonly #decoder = new OpusEncoder(WEBRTC_AUDIO_SAMPLE_RATE, 1)
+  readonly #decoder: OpusDecoderHandle
+
+  private constructor(decoder: OpusDecoderHandle) {
+    this.#decoder = decoder
+  }
+
+  static async create(): Promise<OpusRtpAudioDecoder> {
+    return new OpusRtpAudioDecoder(await createDecoder({
+      sampleRate: WEBRTC_AUDIO_SAMPLE_RATE,
+      channels: 1,
+      maxFrameSize: WEBRTC_AUDIO_FRAME_SAMPLES * 6,
+    }))
+  }
 
   decode(packet: RtpPacket): PcmChunk {
-    const decoded = this.#decoder.decode(packet.payload)
-    if (decoded.byteLength === 0 || decoded.byteLength % 2 !== 0) {
-      throw new Error('WebRTC Opus decoder returned an invalid PCM frame')
-    }
-    return pcmChunk(Uint8Array.from(decoded), WEBRTC_AUDIO_SAMPLE_RATE)
+    return this.#pcmChunk(this.#decoder.decode(packet.payload))
   }
+
+  recoverFec(packet: RtpPacket, samples: number): PcmChunk {
+    return this.#pcmChunk(
+      this.#decoder.decode(packet.payload, { decodeFec: true, frameSize: samples }),
+      samples,
+    )
+  }
+
+  conceal(samples: number): PcmChunk {
+    return this.#pcmChunk(this.#decoder.decodePacketLoss(samples), samples)
+  }
+
+  close(): void {
+    this.#decoder.free()
+  }
+
+  #pcmChunk(decoded: Int16Array, expectedSamples?: number): PcmChunk {
+    if (decoded.length === 0 || (expectedSamples !== undefined && decoded.length !== expectedSamples)) {
+      throw new Error(
+        expectedSamples === undefined
+          ? 'WebRTC Opus decoder returned an empty PCM frame'
+          : `WebRTC Opus decoder returned ${decoded.length} samples; expected ${expectedSamples}`,
+      )
+    }
+    return pcmChunk(encodePcm16Le(decoded), WEBRTC_AUDIO_SAMPLE_RATE)
+  }
+}
+
+export async function createWebRtcOpusEncoder(): Promise<OpusEncoderHandle> {
+  return createEncoder({
+    sampleRate: WEBRTC_AUDIO_SAMPLE_RATE,
+    channels: 1,
+    frameSize: WEBRTC_AUDIO_FRAME_SAMPLES,
+    bitrate: WEBRTC_OPUS_BITRATE,
+  })
+}
+
+export type OpusRtpAudioDecoderLike = Pick<
+  OpusRtpAudioDecoder,
+  'decode' | 'recoverFec' | 'conceal'
+>
+
+export type OpusRtpAudioReceiverOptions = {
+  scheduler?: OpusRtpAudioSenderScheduler
+  decoder: OpusRtpAudioDecoderLike
+  payloadType?: number
+  playoutDelayMilliseconds?: number
+  idleTimeoutMilliseconds?: number
+  onAudio(chunk: PcmChunk, timing: OpusRtpAudioFrameTiming): void
+  onError?: (error: Error) => void
+  onDecodeError?: (error: Error, packet: RtpPacket) => void
+  onPacketLoss?: (packets: number) => void
+  onPacketRepair?: (method: 'fec' | 'plc') => void
+}
+
+export type OpusRtpAudioFrameTiming = {
+  /** RTP timestamp at the beginning of this output frame. */
+  timestamp: number
+  /** Whether this frame advances the remote RTP media timeline. */
+  advancesMediaTime: boolean
+  source: 'packet' | 'fec' | 'plc' | 'dtx' | 'rebuffering'
+}
+
+/**
+ * Reorders and paces remote Opus/RTP before decoding it.
+ *
+ * The media track exposes packets at network arrival time. Feeding those
+ * packets directly to the speaker collapses Opus DTX gaps and lets network
+ * jitter drain the hardware buffer. Keep a small playout delay and use the RTP
+ * timestamp as the audio clock. A timestamp gap with contiguous sequence
+ * numbers is Opus DTX; a sequence gap is packet loss. If no future packet is
+ * available, rebuffer without guessing which one occurred.
+ *
+ * The RTP timestamp is the sole media-time cursor. Sequence numbers are used
+ * only for duplicate rejection and loss reporting. Every playout tick makes
+ * exactly one terminal transition: decode a packet, conceal missing media,
+ * rebuffer without advancing media time, or pause an idle timeline.
+ */
+export class OpusRtpAudioReceiver {
+  readonly #scheduler: OpusRtpAudioSenderScheduler
+  readonly #decoder: OpusRtpAudioDecoderLike
+  readonly #payloadType: number | undefined
+  readonly #playoutDelayMilliseconds: number
+  readonly #idleTimeoutMilliseconds: number
+  readonly #onAudio: (chunk: PcmChunk, timing: OpusRtpAudioFrameTiming) => void
+  readonly #onError: ((error: Error) => void) | undefined
+  readonly #onDecodeError: ((error: Error, packet: RtpPacket) => void) | undefined
+  readonly #onPacketLoss: ((packets: number) => void) | undefined
+  readonly #onPacketRepair: ((method: 'fec' | 'plc') => void) | undefined
+  readonly #packets = new Map<number, RtpPacket>()
+  #ssrc: number | undefined
+  #playoutTimestamp: number | undefined
+  #retiredSequence: number | undefined
+  #lastReceivedAt = 0
+  #nextPlayoutAt = 0
+  #rebufferUntil: number | undefined
+  #timer: OpusRtpAudioSenderTimer | undefined
+  #consecutiveDecodeFailures = 0
+  #closed = false
+
+  constructor(options: OpusRtpAudioReceiverOptions) {
+    this.#scheduler = options.scheduler ?? defaultAudioSenderScheduler
+    this.#decoder = options.decoder
+    this.#payloadType = options.payloadType
+    this.#playoutDelayMilliseconds =
+      options.playoutDelayMilliseconds ?? REMOTE_AUDIO_PLAYOUT_DELAY_MS
+    this.#idleTimeoutMilliseconds =
+      options.idleTimeoutMilliseconds ?? REMOTE_AUDIO_IDLE_TIMEOUT_MS
+    this.#onAudio = options.onAudio
+    this.#onError = options.onError
+    this.#onDecodeError = options.onDecodeError
+    this.#onPacketLoss = options.onPacketLoss
+    this.#onPacketRepair = options.onPacketRepair
+    if (
+      this.#payloadType !== undefined &&
+      (!Number.isInteger(this.#payloadType) || this.#payloadType < 0 || this.#payloadType > 127)
+    ) {
+      throw new RangeError('remote audio payload type must be an integer from 0 through 127')
+    }
+    if (!Number.isFinite(this.#playoutDelayMilliseconds) || this.#playoutDelayMilliseconds < 0) {
+      throw new RangeError('remote audio playout delay must be a non-negative finite number')
+    }
+    if (!Number.isFinite(this.#idleTimeoutMilliseconds) || this.#idleTimeoutMilliseconds <= 0) {
+      throw new RangeError('remote audio idle timeout must be a positive finite number')
+    }
+  }
+
+  push(packet: RtpPacket): void {
+    if (this.#closed) return
+    const now = this.#scheduler.now()
+    if (
+      this.#playoutTimestamp === undefined ||
+      this.#ssrc !== packet.header.ssrc ||
+      now - this.#lastReceivedAt >= this.#idleTimeoutMilliseconds
+    ) {
+      this.#startTimeline(packet, now)
+      return
+    }
+
+    if (
+      this.#retiredSequence !== undefined &&
+      sequenceDistance(packet.header.sequenceNumber, this.#retiredSequence) <= 0
+    ) return
+    if (this.#packets.has(packet.header.sequenceNumber)) return
+
+    const timestampDelta = timestampDistance(
+      packet.header.timestamp,
+      this.#playoutTimestamp,
+    )
+    if (Math.abs(timestampDelta) > MAX_REMOTE_TIMESTAMP_GAP_SAMPLES) {
+      // A newer packet outside the active RTP timeline is a stream
+      // discontinuity, not jitter. An older packet is only a delayed duplicate.
+      if (
+        timestampDelta > 0 ||
+        this.#retiredSequence === undefined ||
+        sequenceDistance(packet.header.sequenceNumber, this.#retiredSequence) > 0
+      ) {
+        this.#startTimeline(packet, now)
+      }
+      return
+    }
+    if (this.#packets.size >= MAX_QUEUED_REMOTE_PACKETS) {
+      this.#startTimeline(packet, now)
+      return
+    }
+    this.#packets.set(packet.header.sequenceNumber, packet)
+    this.#lastReceivedAt = now
+    if (this.#rebufferUntil === Number.POSITIVE_INFINITY) {
+      this.#rebufferUntil = now + this.#playoutDelayMilliseconds
+    }
+  }
+
+  stop(): void {
+    if (this.#closed) return
+    this.#closed = true
+    this.#pause()
+  }
+
+  #startTimeline(packet: RtpPacket, now: number): void {
+    this.#pause()
+    this.#ssrc = packet.header.ssrc
+    this.#playoutTimestamp = packet.header.timestamp
+    this.#retiredSequence = addSequence(packet.header.sequenceNumber, -1)
+    this.#lastReceivedAt = now
+    this.#nextPlayoutAt = now + this.#playoutDelayMilliseconds
+    this.#rebufferUntil = undefined
+    this.#consecutiveDecodeFailures = 0
+    this.#packets.set(packet.header.sequenceNumber, packet)
+    this.#schedule()
+  }
+
+  #schedule(): void {
+    if (this.#closed || this.#timer !== undefined || this.#playoutTimestamp === undefined) return
+    const delay = Math.max(0, this.#nextPlayoutAt - this.#scheduler.now())
+    this.#timer = this.#scheduler.setTimeout(() => this.#tick(), delay)
+  }
+
+  #tick(): void {
+    this.#timer = undefined
+    if (this.#closed || this.#playoutTimestamp === undefined) return
+    const now = this.#scheduler.now()
+    if (now < this.#nextPlayoutAt) {
+      this.#schedule()
+      return
+    }
+
+    try {
+      if (this.#rebufferUntil !== undefined) {
+        if (now - this.#lastReceivedAt >= this.#idleTimeoutMilliseconds) {
+          this.#pause()
+          return
+        }
+        if (now < this.#rebufferUntil) {
+          this.#emitRebufferingSilence()
+          return
+        }
+        this.#rebufferUntil = undefined
+      }
+      const selection = this.#selectPacket()
+      for (const packet of selection.stale) {
+        this.#packets.delete(packet.header.sequenceNumber)
+        this.#retirePacket(packet)
+      }
+
+      if (selection.current) {
+        this.#decodeAndEmit(selection.current, selection.future)
+        return
+      }
+      if (selection.future) {
+        this.#fillTimestampGap(selection.future, selection.futureDelta)
+        return
+      }
+      if (selection.stale.length > 0) {
+        this.#emitRebufferingSilence()
+        return
+      }
+      if (now - this.#lastReceivedAt >= this.#idleTimeoutMilliseconds) {
+        this.#pause()
+        return
+      }
+      this.#rebufferUntil = Number.POSITIVE_INFINITY
+      this.#emitRebufferingSilence()
+    } catch (error) {
+      this.#fail(error)
+    }
+  }
+
+  #selectPacket(): {
+    stale: RtpPacket[]
+    current: RtpPacket | undefined
+    future: RtpPacket | undefined
+    futureDelta: number
+  } {
+    if (this.#playoutTimestamp === undefined) {
+      return { stale: [], current: undefined, future: undefined, futureDelta: 0 }
+    }
+    const stale: Array<{ packet: RtpPacket; timestampDelta: number }> = []
+    let current: RtpPacket | undefined
+    let future: RtpPacket | undefined
+    let futureDelta = Number.POSITIVE_INFINITY
+    for (const packet of this.#packets.values()) {
+      const timestampDelta = timestampDistance(
+        packet.header.timestamp,
+        this.#playoutTimestamp,
+      )
+      if (timestampDelta < 0) {
+        stale.push({ packet, timestampDelta })
+      } else if (timestampDelta === 0) {
+        if (!current || this.#isEarlierSequence(packet, current)) current = packet
+      } else if (
+        timestampDelta < futureDelta ||
+        (timestampDelta === futureDelta && future && this.#isEarlierSequence(packet, future))
+      ) {
+        future = packet
+        futureDelta = timestampDelta
+      }
+    }
+    stale.sort((left, right) =>
+      left.timestampDelta - right.timestampDelta ||
+      sequenceDistance(left.packet.header.sequenceNumber, right.packet.header.sequenceNumber),
+    )
+    return {
+      stale: stale.map(({ packet }) => packet),
+      current,
+      future,
+      futureDelta: Number.isFinite(futureDelta) ? futureDelta : 0,
+    }
+  }
+
+  #isEarlierSequence(left: RtpPacket, right: RtpPacket): boolean {
+    if (this.#retiredSequence === undefined) {
+      return left.header.sequenceNumber < right.header.sequenceNumber
+    }
+    return sequenceDistance(left.header.sequenceNumber, this.#retiredSequence) <
+      sequenceDistance(right.header.sequenceNumber, this.#retiredSequence)
+  }
+
+  #decodeAndEmit(packet: RtpPacket, future: RtpPacket | undefined): void {
+    this.#packets.delete(packet.header.sequenceNumber)
+    this.#retirePacket(packet)
+    this.#playoutTimestamp = packet.header.timestamp
+    if (
+      this.#payloadType !== undefined &&
+      packet.header.payloadType !== this.#payloadType
+    ) {
+      this.#consecutiveDecodeFailures = 0
+      this.#emitTimelineSilence(WEBRTC_AUDIO_FRAME_SAMPLES)
+      return
+    }
+    let chunk: PcmChunk
+    try {
+      chunk = this.#decoder.decode(packet)
+    } catch (error) {
+      const normalized = normalizeError(error)
+      this.#consecutiveDecodeFailures += 1
+      this.#onDecodeError?.(normalized, packet)
+      if (
+        this.#consecutiveDecodeFailures >=
+        MAX_CONSECUTIVE_REMOTE_DECODE_FAILURES
+      ) {
+        throw new Error(
+          `WebRTC Opus decoder failed for ${this.#consecutiveDecodeFailures} consecutive packets`,
+          { cause: normalized },
+        )
+      }
+      this.#repairMissingMedia(
+        WEBRTC_AUDIO_FRAME_SAMPLES,
+        future &&
+          timestampDistance(future.header.timestamp, packet.header.timestamp) ===
+            WEBRTC_AUDIO_FRAME_SAMPLES
+          ? future
+          : undefined,
+      )
+      return
+    }
+    this.#consecutiveDecodeFailures = 0
+    this.#emitMediaChunk(chunk, packet.header.timestamp, 'packet')
+  }
+
+  #retirePacket(packet: RtpPacket): void {
+    const sequenceNumber = packet.header.sequenceNumber
+    if (this.#retiredSequence === undefined) {
+      this.#retiredSequence = sequenceNumber
+      return
+    }
+    const distance = sequenceDistance(sequenceNumber, this.#retiredSequence)
+    if (distance <= 0) return
+    if (distance > 1) this.#onPacketLoss?.(distance - 1)
+    this.#retiredSequence = sequenceNumber
+  }
+
+  #fillTimestampGap(future: RtpPacket, futureDelta: number): void {
+    const samples = Math.min(WEBRTC_AUDIO_FRAME_SAMPLES, futureDelta)
+    const missingPackets = this.#retiredSequence === undefined
+      ? 0
+      : Math.max(
+          0,
+          sequenceDistance(future.header.sequenceNumber, this.#retiredSequence) - 1,
+        )
+    const missingPacketSamples = missingPackets * WEBRTC_AUDIO_FRAME_SAMPLES
+    if (futureDelta > missingPacketSamples) {
+      this.#emitTimelineSilence(samples)
+      return
+    }
+    this.#repairMissingMedia(
+      samples,
+      futureDelta <= WEBRTC_AUDIO_FRAME_SAMPLES ? future : undefined,
+    )
+  }
+
+  #emitTimelineSilence(samples: number): void {
+    if (this.#playoutTimestamp === undefined) return
+    const timestamp = this.#playoutTimestamp
+    this.#playoutTimestamp = addTimestamp(this.#playoutTimestamp, samples)
+    this.#emitSilence(samples, {
+      timestamp,
+      advancesMediaTime: true,
+      source: 'dtx',
+    })
+  }
+
+  #repairMissingMedia(samples: number, fecPacket?: RtpPacket): void {
+    if (this.#playoutTimestamp === undefined) return
+    const timestamp = this.#playoutTimestamp
+    let chunk: PcmChunk | undefined
+    if (fecPacket) {
+      try {
+        chunk = this.#decoder.recoverFec(fecPacket, samples)
+      } catch (error) {
+        this.#onDecodeError?.(normalizeError(error), fecPacket)
+      }
+    }
+    if (chunk) {
+      this.#onPacketRepair?.('fec')
+      this.#emitMediaChunk(chunk, timestamp, 'fec', samples)
+      return
+    }
+    this.#onPacketRepair?.('plc')
+    this.#emitMediaChunk(this.#decoder.conceal(samples), timestamp, 'plc', samples)
+  }
+
+  #emitRebufferingSilence(): void {
+    if (this.#playoutTimestamp === undefined) return
+    this.#emitSilence(WEBRTC_AUDIO_FRAME_SAMPLES, {
+      timestamp: this.#playoutTimestamp,
+      advancesMediaTime: false,
+      source: 'rebuffering',
+    })
+  }
+
+  #emitSilence(samples: number, timing: OpusRtpAudioFrameTiming): void {
+    const byteLength = samples * 2
+    this.#onAudio(
+      pcmChunk(
+        byteLength === WEBRTC_SILENCE_BYTES.byteLength
+          ? WEBRTC_SILENCE_BYTES
+          : WEBRTC_SILENCE_BYTES.slice(0, byteLength),
+        WEBRTC_AUDIO_SAMPLE_RATE,
+      ),
+      timing,
+    )
+    this.#advancePlayout(samples)
+  }
+
+  #emitMediaChunk(
+    chunk: PcmChunk,
+    timestamp: number,
+    source: 'packet' | 'fec' | 'plc',
+    expectedSamples?: number,
+  ): void {
+    if (
+      chunk.sampleRate !== WEBRTC_AUDIO_SAMPLE_RATE ||
+      chunk.channels !== 1 ||
+      chunk.format !== 's16le' ||
+      chunk.data.byteLength % 2 !== 0
+    ) {
+      throw new Error('WebRTC Opus decoder returned incompatible PCM')
+    }
+    const samples = chunk.data.byteLength / 2
+    if (
+      !Number.isInteger(samples) ||
+      samples <= 0 ||
+      (expectedSamples !== undefined && samples !== expectedSamples)
+    ) {
+      throw new Error(
+        expectedSamples === undefined
+          ? 'WebRTC Opus decoder returned an empty PCM frame'
+          : `WebRTC Opus repair returned ${samples} samples; expected ${expectedSamples}`,
+      )
+    }
+    this.#playoutTimestamp = addTimestamp(timestamp, samples)
+    this.#onAudio(chunk, {
+      timestamp,
+      advancesMediaTime: true,
+      source,
+    })
+    this.#advancePlayout(samples)
+  }
+
+  #advancePlayout(samples: number): void {
+    const interval = (samples * 1_000) / WEBRTC_AUDIO_SAMPLE_RATE
+    this.#nextPlayoutAt = Math.max(
+      this.#nextPlayoutAt + interval,
+      this.#scheduler.now() + interval,
+    )
+    this.#schedule()
+  }
+
+  #pause(): void {
+    if (this.#timer !== undefined) this.#scheduler.clearTimeout(this.#timer)
+    this.#timer = undefined
+    this.#packets.clear()
+    this.#ssrc = undefined
+    this.#playoutTimestamp = undefined
+    this.#retiredSequence = undefined
+    this.#lastReceivedAt = 0
+    this.#nextPlayoutAt = 0
+    this.#rebufferUntil = undefined
+    this.#consecutiveDecodeFailures = 0
+  }
+
+  #fail(error: unknown): void {
+    const normalized = normalizeError(error)
+    this.stop()
+    if (this.#onError) this.#onError(normalized)
+    else queueMicrotask(() => {
+      throw normalized
+    })
+  }
+}
+
+export type RealtimeAudioTurnStart = {
+  id: string
+  startMilliseconds: number
+}
+
+type PendingRealtimeAudioTurn = RealtimeAudioTurnStart & {
+  end?: RealtimeAudioTurnEnd
+  endTimestamp?: number
+}
+
+/**
+ * Maps Frameless Bidi v3 turn timestamps onto the remote RTP media clock.
+ *
+ * The v3 transport emits RTP continuously, including while the assistant is
+ * silent, and does not expose the public Realtime API's authoritative
+ * `output_audio_buffer.stopped` event. Measurements across independent v3
+ * sessions show that `start_ms` and `end_ms` use the same session-relative
+ * clock as the remote 48 kHz RTP stream. Capture the RTP origin independently
+ * of turn event arrival, then close only after both `turn.done` and receiver
+ * playout reaching the declared end. No PCM audibility heuristic participates
+ * in the boundary, so data-channel/RTP reordering cannot lose the origin.
+ */
+export class RealtimeAudioClockBoundaryTracker {
+  #originTimestamp: number | undefined
+  #ssrc: number | undefined
+  #lastMediaEndTimestamp: number | undefined
+  #turn: PendingRealtimeAudioTurn | undefined
+
+  observePacket(timestamp: number, ssrc: number): void {
+    requiredUint32(timestamp, 'remote RTP timestamp')
+    requiredUint32(ssrc, 'remote RTP SSRC')
+    if (this.#originTimestamp === undefined) {
+      this.#originTimestamp = timestamp
+      this.#ssrc = ssrc
+      this.#updateEndTimestamp()
+      return
+    }
+    if (ssrc !== this.#ssrc) {
+      throw new Error(
+        `remote RTP SSRC changed from ${String(this.#ssrc)} to ${ssrc}; the v3 media clock can no longer be correlated`,
+      )
+    }
+  }
+
+  start(turn: RealtimeAudioTurnStart): void {
+    validateTurnStart(turn)
+    if (this.#turn?.id === turn.id) {
+      if (this.#turn.startMilliseconds === turn.startMilliseconds) return
+      throw new Error(
+        `assistant audio turn ${turn.id} changed its start time from ${this.#turn.startMilliseconds} to ${turn.startMilliseconds} ms`,
+      )
+    }
+    if (this.#turn) {
+      throw new Error(
+        `assistant audio turn ${turn.id} started before ${this.#turn.id} reached its media boundary`,
+      )
+    }
+    this.#turn = { ...turn }
+  }
+
+  finish(turn: RealtimeAudioTurnEnd): RealtimeAudioTurnEnd | undefined {
+    validateTurnEnd(turn)
+    const active = this.#turn
+    if (!active) {
+      throw new Error(`assistant audio turn ${turn.id} ended before it started`)
+    }
+    if (active.id !== turn.id) {
+      throw new Error(
+        `assistant audio turn ${turn.id} ended while ${active.id} was active`,
+      )
+    }
+    if (active.startMilliseconds !== turn.startMilliseconds) {
+      throw new Error(
+        `assistant audio turn ${turn.id} changed its start time from ${active.startMilliseconds} to ${turn.startMilliseconds} ms`,
+      )
+    }
+    active.end = turn
+    this.#updateEndTimestamp()
+    return this.#takeCompleted()
+  }
+
+  advance(
+    timing: OpusRtpAudioFrameTiming,
+    samples: number,
+  ): RealtimeAudioTurnEnd | undefined {
+    if (!Number.isSafeInteger(samples) || samples <= 0) {
+      throw new RangeError('remote audio frame must contain a positive safe integer number of samples')
+    }
+    if (!timing.advancesMediaTime) return undefined
+    requiredUint32(timing.timestamp, 'remote audio frame timestamp')
+    if (this.#originTimestamp === undefined) {
+      // Unit-level callers may provide decoded frames without the raw packet
+      // callback. Production establishes this from observePacket first.
+      this.#originTimestamp = timing.timestamp
+      this.#updateEndTimestamp()
+    }
+    if (
+      this.#lastMediaEndTimestamp !== undefined &&
+      timestampDistance(timing.timestamp, this.#lastMediaEndTimestamp) < 0
+    ) {
+      throw new Error('remote RTP playout clock moved backwards')
+    }
+    this.#lastMediaEndTimestamp = addTimestamp(timing.timestamp, samples)
+    return this.#takeCompleted()
+  }
+
+  reset(): void {
+    this.#originTimestamp = undefined
+    this.#ssrc = undefined
+    this.#lastMediaEndTimestamp = undefined
+    this.#turn = undefined
+  }
+
+  #updateEndTimestamp(): void {
+    if (!this.#turn?.end || this.#originTimestamp === undefined) return
+    const endSamples = this.#turn.end.endMilliseconds *
+      (WEBRTC_AUDIO_SAMPLE_RATE / 1_000)
+    if (!Number.isSafeInteger(endSamples)) {
+      throw new RangeError('assistant audio turn end exceeds the v3 RTP clock range')
+    }
+    this.#turn.endTimestamp = addTimestamp(this.#originTimestamp, endSamples)
+  }
+
+  #takeCompleted(): RealtimeAudioTurnEnd | undefined {
+    const turn = this.#turn
+    if (
+      !turn?.end ||
+      turn.endTimestamp === undefined ||
+      this.#lastMediaEndTimestamp === undefined ||
+      timestampDistance(this.#lastMediaEndTimestamp, turn.endTimestamp) < 0
+    ) return undefined
+    const completed = turn.end
+    this.#turn = undefined
+    return completed
+  }
+}
+
+function parseAssistantTurnStart(
+  event: Record<string, unknown>,
+): RealtimeAudioTurnStart | undefined {
+  if (!isRecord(event.turn)) throw new Error('turn.created is missing its turn object')
+  const role = event.turn.role
+  if (typeof role !== 'string') throw new Error('turn.created is missing its role')
+  if (role !== 'assistant') return undefined
+  const turn = {
+    id: requiredString(event.turn.id, 'turn.created turn id'),
+    startMilliseconds: requiredMilliseconds(
+      event.turn.start_ms,
+      'turn.created start_ms',
+    ),
+  }
+  validateTurnStart(turn)
+  return turn
+}
+
+function parseAssistantTurnEnd(
+  event: Record<string, unknown>,
+): RealtimeAudioTurnEnd | undefined {
+  if (!isRecord(event.turn)) throw new Error('turn.done is missing its turn object')
+  const role = event.turn.role
+  if (typeof role !== 'string') throw new Error('turn.done is missing its role')
+  if (role !== 'assistant') return undefined
+  const turn = {
+    id: requiredString(event.turn.id, 'turn.done turn id'),
+    startMilliseconds: requiredMilliseconds(
+      event.turn.start_ms,
+      'turn.done start_ms',
+    ),
+    endMilliseconds: requiredMilliseconds(
+      event.turn.end_ms,
+      'turn.done end_ms',
+    ),
+    transcript: requiredString(event.turn.transcript, 'turn.done transcript', true),
+  }
+  validateTurnEnd(turn)
+  return turn
+}
+
+function validateTurnStart(turn: RealtimeAudioTurnStart): void {
+  requiredString(turn.id, 'assistant audio turn id')
+  requiredMilliseconds(turn.startMilliseconds, 'assistant audio turn start')
+}
+
+function validateTurnEnd(turn: RealtimeAudioTurnEnd): void {
+  validateTurnStart(turn)
+  requiredMilliseconds(turn.endMilliseconds, 'assistant audio turn end')
+  if (turn.endMilliseconds < turn.startMilliseconds) {
+    throw new RangeError('assistant audio turn ends before it starts')
+  }
+  if (typeof turn.transcript !== 'string') {
+    throw new TypeError('assistant audio turn transcript must be a string')
+  }
+}
+
+function requiredString(value: unknown, label: string, allowEmpty = false): string {
+  if (typeof value !== 'string' || (!allowEmpty && value.length === 0)) {
+    throw new TypeError(`${label} must be ${allowEmpty ? 'a string' : 'a non-empty string'}`)
+  }
+  return value
+}
+
+function requiredMilliseconds(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer`)
+  }
+  return value as number
+}
+
+function requiredUint32(value: unknown, label: string): number {
+  if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > 0xffff_ffff) {
+    throw new RangeError(`${label} must be an unsigned 32-bit integer`)
+  }
+  return value as number
 }
 
 export class RealtimeWebRtcSession
@@ -307,9 +1034,20 @@ export class RealtimeWebRtcSession
   #peer: RTCPeerConnection | undefined
   #dataChannel: RTCDataChannel | undefined
   #localTrack: MediaStreamTrack | undefined
+  #opusEncoder: OpusEncoderHandle | undefined
+  #opusDecoder: OpusRtpAudioDecoder | undefined
   #sender: OpusRtpAudioSender | undefined
   #remoteAudioAttached = false
+  readonly #audioBoundary = new RealtimeAudioClockBoundaryTracker()
+  #pendingAudioBoundary: RealtimeAudioTurnEnd | undefined
+  #audioBoundaryStallTimer: NodeJS.Timeout | undefined
   #peerDisconnectedTimer: NodeJS.Timeout | undefined
+  #remoteAudioWarningTimer: NodeJS.Timeout | undefined
+  #remoteAudioDecodeFailures = 0
+  #remoteAudioFirstDecodeFailure: string | undefined
+  #remoteAudioLostPackets = 0
+  #remoteAudioFecRepairs = 0
+  #remoteAudioPlcRepairs = 0
   #starting = false
   #started = false
   #closing = false
@@ -327,6 +1065,24 @@ export class RealtimeWebRtcSession
     if (this.#starting || this.#started) throw new Error('WebRTC realtime session is already started')
     if (this.#closing || this.#finished) throw new Error('WebRTC realtime session is closed')
     this.#starting = true
+    let opusEncoder: OpusEncoderHandle
+    try {
+      opusEncoder = await createWebRtcOpusEncoder()
+      this.#opusEncoder = opusEncoder
+      this.#opusDecoder = await OpusRtpAudioDecoder.create()
+      if (this.#closing) {
+        throw new Error('WebRTC realtime session was closed during Opus initialization')
+      }
+    } catch (error) {
+      this.#fail(error)
+      this.#opusEncoder?.free()
+      this.#opusEncoder = undefined
+      this.#opusDecoder?.close()
+      this.#opusDecoder = undefined
+      await this.close()
+      this.#starting = false
+      throw normalizeError(error)
+    }
     const peer = new RTCPeerConnection({
       bundlePolicy: 'max-bundle',
       codecs: {
@@ -382,6 +1138,7 @@ export class RealtimeWebRtcSession
       })
       await peer.setRemoteDescription({ type: 'answer', sdp: answerSdp })
       this.#sender = new OpusRtpAudioSender(localTrack, {
+        encoder: opusEncoder,
         onError: (error) => this.#fail(error),
         payloadType: opusPayloadTypeFromSdp(answerSdp),
       })
@@ -428,8 +1185,16 @@ export class RealtimeWebRtcSession
   async #close(): Promise<void> {
     this.#closing = true
     this.#clearPeerDisconnectedTimer()
+    this.#clearAudioBoundaryStallTimer()
+    this.#pendingAudioBoundary = undefined
     this.#sender?.stop()
+    this.#audioBoundary.reset()
     for (const unsubscribe of this.#subscriptions.splice(0)) unsubscribe()
+    this.#flushRemoteAudioWarnings()
+    this.#opusEncoder?.free()
+    this.#opusEncoder = undefined
+    this.#opusDecoder?.close()
+    this.#opusDecoder = undefined
     try {
       this.#dataChannel?.close()
     } catch {
@@ -448,24 +1213,61 @@ export class RealtimeWebRtcSession
       this.#fail(new Error(`WebRTC negotiated unsupported remote codec: ${track.codec?.mimeType}`))
       return
     }
-    const decoder = new OpusRtpAudioDecoder()
+    const decoder = this.#opusDecoder
+    if (!decoder) {
+      this.#fail(new Error('WebRTC remote audio arrived before the Opus decoder was initialized'))
+      return
+    }
+    const receiver = new OpusRtpAudioReceiver({
+      decoder,
+      onAudio: (chunk, timing) => {
+        const completed = this.#audioBoundary.advance(
+          timing,
+          chunk.data.byteLength / 2,
+        )
+        this.emit('audio', chunk)
+        if (completed) {
+          this.#completeAudioBoundary(completed)
+        } else if (timing.advancesMediaTime && this.#pendingAudioBoundary) {
+          this.#scheduleAudioBoundaryStallFailure()
+        }
+      },
+      ...(track.codec?.payloadType !== undefined
+        ? { payloadType: track.codec.payloadType }
+        : {}),
+      onError: (error) => this.#fail(remoteAudioProcessingError(error)),
+      onDecodeError: (error, packet) => this.#recordRemoteAudioDecodeFailure(
+        `sequence=${packet.header.sequenceNumber} payloadType=${packet.header.payloadType} bytes=${packet.payload.byteLength} reason=${error.message}`,
+      ),
+      onPacketLoss: (packets) => this.#recordRemoteAudioPacketLoss(packets),
+      onPacketRepair: (method) => this.#recordRemoteAudioRepair(method),
+    })
     this.#subscribe(track.onReceiveRtp, (packet) => {
       try {
-        this.emit('audio', decoder.decode(packet))
+        this.#audioBoundary.observePacket(
+          packet.header.timestamp,
+          packet.header.ssrc,
+        )
+        receiver.push(packet)
       } catch (error) {
-        this.#fail(new Error('WebRTC remote Opus audio could not be decoded', {
-          cause: error,
-        }))
+        this.#fail(remoteAudioProcessingError(error))
       }
     })
+    this.#subscriptions.push(() => receiver.stop())
     this.#remoteAudioAttached = true
     this.#remoteAudioTrack.resolve()
   }
 
   #handleDataChannelMessage(message: string | Buffer): void {
+    let parsed: unknown
     try {
-      const parsed: unknown = JSON.parse(Buffer.isBuffer(message) ? message.toString('utf8') : message)
-      if (!isRecord(parsed)) return
+      parsed = JSON.parse(Buffer.isBuffer(message) ? message.toString('utf8') : message)
+    } catch (error) {
+      this.#fail(new Error('WebRTC realtime data channel returned invalid JSON', { cause: error }))
+      return
+    }
+    if (!isRecord(parsed)) return
+    try {
       if (parsed.type === 'session.started') this.#sessionStarted.resolve()
       if (parsed.type === 'error') {
         const details = isRecord(parsed.error) ? parsed.error : undefined
@@ -478,9 +1280,37 @@ export class RealtimeWebRtcSession
         )
         return
       }
+      if (parsed.type === 'turn.created') {
+        const turn = parseAssistantTurnStart(parsed)
+        if (turn) {
+          this.#audioBoundary.start(turn)
+          console.log(
+            `WebRTC assistant turn started: turn=${turn.id} start_ms=${turn.startMilliseconds}`,
+          )
+        }
+      } else if (parsed.type === 'turn.done') {
+        const turn = parseAssistantTurnEnd(parsed)
+        if (turn) {
+          console.log(
+            `WebRTC assistant turn done: turn=${turn.id} start_ms=${turn.startMilliseconds} end_ms=${turn.endMilliseconds}`,
+          )
+          const completed = this.#audioBoundary.finish(turn)
+          this.emit('audioEndDeclared', turn)
+          if (completed) {
+            this.#completeAudioBoundary(completed)
+          } else {
+            this.#pendingAudioBoundary = turn
+            this.#scheduleAudioBoundaryStallFailure()
+          }
+        }
+      }
       this.emit('event', parsed)
     } catch (error) {
-      this.#fail(new Error('WebRTC realtime data channel returned invalid JSON', { cause: error }))
+      this.#fail(
+        new Error('WebRTC realtime data channel returned an invalid audio turn boundary', {
+          cause: error,
+        }),
+      )
     }
   }
 
@@ -516,6 +1346,91 @@ export class RealtimeWebRtcSession
     this.#peerDisconnectedTimer = undefined
   }
 
+  #completeAudioBoundary(turn: RealtimeAudioTurnEnd): void {
+    this.#clearAudioBoundaryStallTimer()
+    this.#pendingAudioBoundary = undefined
+    console.log(
+      `WebRTC assistant media boundary reached: turn=${turn.id} end_ms=${turn.endMilliseconds}`,
+    )
+    this.emit('audioEnd', turn)
+  }
+
+  #scheduleAudioBoundaryStallFailure(): void {
+    const pending = this.#pendingAudioBoundary
+    if (!pending || this.#closing || this.#finished) return
+    this.#clearAudioBoundaryStallTimer()
+    this.#audioBoundaryStallTimer = setTimeout(() => {
+      this.#audioBoundaryStallTimer = undefined
+      if (this.#pendingAudioBoundary !== pending || this.#closing || this.#finished) return
+      this.#fail(
+        new Error(
+          `WebRTC assistant RTP media clock stalled before turn=${pending.id} end_ms=${pending.endMilliseconds}`,
+        ),
+      )
+    }, WEBRTC_AUDIO_BOUNDARY_STALL_MS)
+  }
+
+  #clearAudioBoundaryStallTimer(): void {
+    if (!this.#audioBoundaryStallTimer) return
+    clearTimeout(this.#audioBoundaryStallTimer)
+    this.#audioBoundaryStallTimer = undefined
+  }
+
+  #recordRemoteAudioDecodeFailure(details: string): void {
+    this.#remoteAudioDecodeFailures += 1
+    this.#remoteAudioFirstDecodeFailure ??= details
+    this.#scheduleRemoteAudioWarning()
+  }
+
+  #recordRemoteAudioPacketLoss(packets: number): void {
+    this.#remoteAudioLostPackets += packets
+    this.#scheduleRemoteAudioWarning()
+  }
+
+  #recordRemoteAudioRepair(method: 'fec' | 'plc'): void {
+    if (method === 'fec') this.#remoteAudioFecRepairs += 1
+    else this.#remoteAudioPlcRepairs += 1
+    this.#scheduleRemoteAudioWarning()
+  }
+
+  #scheduleRemoteAudioWarning(): void {
+    if (this.#remoteAudioWarningTimer) return
+    this.#remoteAudioWarningTimer = setTimeout(() => {
+      this.#remoteAudioWarningTimer = undefined
+      this.#flushRemoteAudioWarnings()
+    }, REMOTE_AUDIO_WARNING_INTERVAL_MS)
+    this.#remoteAudioWarningTimer.unref()
+  }
+
+  #flushRemoteAudioWarnings(): void {
+    if (this.#remoteAudioWarningTimer) {
+      clearTimeout(this.#remoteAudioWarningTimer)
+      this.#remoteAudioWarningTimer = undefined
+    }
+    const summaries: string[] = []
+    if (this.#remoteAudioDecodeFailures > 0) {
+      summaries.push(
+        `${this.#remoteAudioDecodeFailures} decode failure(s); first ${this.#remoteAudioFirstDecodeFailure ?? 'unknown'}`,
+      )
+    }
+    if (this.#remoteAudioLostPackets > 0) {
+      summaries.push(`${this.#remoteAudioLostPackets} lost packet(s)`)
+    }
+    if (this.#remoteAudioFecRepairs > 0 || this.#remoteAudioPlcRepairs > 0) {
+      summaries.push(
+        `repairs fec=${this.#remoteAudioFecRepairs} plc=${this.#remoteAudioPlcRepairs}`,
+      )
+    }
+    this.#remoteAudioDecodeFailures = 0
+    this.#remoteAudioFirstDecodeFailure = undefined
+    this.#remoteAudioLostPackets = 0
+    this.#remoteAudioFecRepairs = 0
+    this.#remoteAudioPlcRepairs = 0
+    if (summaries.length > 0) {
+      console.warn(`WebRTC remote audio diagnostics: ${summaries.join('; ')}`)
+    }
+  }
+
   #fail(error: unknown): void {
     if (this.#closing || this.#finished) return
     this.#finish(normalizeError(error))
@@ -525,6 +1440,7 @@ export class RealtimeWebRtcSession
     if (this.#finished) return
     this.#finished = true
     this.#clearPeerDisconnectedTimer()
+    this.#clearAudioBoundaryStallTimer()
     this.#sender?.stop()
     this.#closedDeferred.resolve(error)
     this.emit('close', error)
@@ -548,12 +1464,37 @@ function randomUint32(): number {
   return randomBytes(4).readUInt32BE(0)
 }
 
+function sequenceDistance(value: number, reference: number): number {
+  const distance = (value - reference) & 0xffff
+  return distance < 0x8000 ? distance : distance - 0x1_0000
+}
+
+function addSequence(value: number, increment: number): number {
+  return (value + increment) & 0xffff
+}
+
+function timestampDistance(value: number, reference: number): number {
+  const distance = (value - reference) >>> 0
+  return distance < 0x8000_0000 ? distance : distance - 0x1_0000_0000
+}
+
+function addTimestamp(value: number, samples: number): number {
+  return (value + samples) >>> 0
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
+}
+
+function remoteAudioProcessingError(error: unknown): Error {
+  const cause = normalizeError(error)
+  return new Error(`WebRTC remote Opus/RTP audio processing failed: ${cause.message}`, {
+    cause,
+  })
 }
 
 async function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string): Promise<T> {

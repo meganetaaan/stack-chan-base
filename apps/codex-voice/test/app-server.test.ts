@@ -74,8 +74,16 @@ test('app-server initialization opts into experimental APIs without attestation 
   assert.equal(threadRequest.params.approvalPolicy, 'on-request')
   assert.equal(threadRequest.params.approvalsReviewer, 'user')
   assert.deepEqual(threadRequest.params.dynamicTools, dynamicTools)
-  fromServer.write(`${JSON.stringify({ id: threadRequest.id, result: { thread: { id: 'thread-1' } } })}\n`)
-  assert.equal(await opened, 'thread-1')
+  fromServer.write(
+    `${JSON.stringify({
+      id: threadRequest.id,
+      result: { thread: { id: 'thread-1', status: { type: 'idle' } } },
+    })}\n`,
+  )
+  assert.deepEqual(await opened, {
+    id: 'thread-1',
+    status: { type: 'idle' },
+  })
 
   const realtimeData = once(toServer, 'data')
   const realtimeStarted = appServer.startRealtime({

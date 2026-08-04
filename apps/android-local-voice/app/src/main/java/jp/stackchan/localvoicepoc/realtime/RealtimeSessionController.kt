@@ -14,12 +14,18 @@ import jp.stackchan.localvoicepoc.serial.hasStackChanCapability
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -42,9 +48,18 @@ data class McpServerRequest(
     val requireApproval: Boolean,
 )
 
+fun interface McpToolExecution {
+    suspend fun dispatch(): String
+}
+
+interface McpToolCatalog : AutoCloseable {
+    val definitions: List<ToolDefinition.Mcp>
+    suspend fun prepare(call: DeviceToolCall): McpToolExecution
+    override fun close() = Unit
+}
+
 interface McpToolProvider {
-    suspend fun listTools(request: McpServerRequest): List<ToolDefinition.Mcp>
-    suspend fun execute(call: DeviceToolCall): String
+    suspend fun openCatalog(request: McpServerRequest): McpToolCatalog
     fun setLifecycleSink(sink: suspend (type: String, serverLabel: String, error: String?) -> Unit) = Unit
     fun close() = Unit
 }
@@ -63,13 +78,74 @@ class RealtimeSessionController(
         val retainedUntilMilliseconds: Long,
     )
 
+    private class ProviderGenerationLease(
+        val id: String,
+        val session: JsonObject,
+        val mcpBinding: McpGenerationBinding,
+    ) {
+        val operations = linkedSetOf<Job>()
+        val acknowledged = CompletableDeferred<Unit>()
+        lateinit var announcement: JsonObject
+        var announcementJob: Job? = null
+    }
+
+    private class ProviderGenerationRetiredCancellation(reason: String) : CancellationException(reason)
+
+    private class McpGenerationBinding(
+        private val catalogs: List<McpToolCatalog>,
+    ) : AutoCloseable {
+        private val routes = buildMap {
+            catalogs.forEach { catalog ->
+                catalog.definitions.forEach { definition ->
+                    require(put(definition.name, catalog) == null) {
+                        "MCPツール名が重複しています: ${definition.name}"
+                    }
+                }
+            }
+        }
+
+        val definitions: List<ToolDefinition.Mcp> = catalogs.flatMap(McpToolCatalog::definitions)
+
+        suspend fun prepare(call: DeviceToolCall): McpToolExecution =
+            requireNotNull(routes[call.name]) { "MCPツールが見つかりません: ${call.name}" }.prepare(call)
+
+        override fun close() {
+            catalogs.forEach { catalog -> runCatching { catalog.close() } }
+        }
+
+        companion object {
+            fun empty() = McpGenerationBinding(emptyList())
+        }
+    }
+
+    private data class ParsedTools(
+        val definitions: List<ToolDefinition>,
+        val mcpBinding: McpGenerationBinding,
+    )
+
+    private data class PendingFunction(
+        val providerGeneration: ProviderGenerationLease,
+        val result: CompletableDeferred<String>,
+    )
+
+    private data class RetiredProviderWork(
+        val functions: List<CompletableDeferred<String>>,
+        val operations: List<Job>,
+        val announcementJob: Job?,
+        val mcpBinding: McpGenerationBinding?,
+    )
+
     private val encoder = StackChanEventEncoder()
     private val decoder = StackChanEventDecoder()
     private val decoderLock = Any()
     private val pendingFunctionsLock = Any()
-    private val pendingFunctions = mutableMapOf<String, CompletableDeferred<String>>()
+    private val providerTransitionMutex = Mutex()
+    private val pendingFunctions = mutableMapOf<String, PendingFunction>()
+    private val providerUpdateHistory = mutableMapOf<String, JsonObject>()
     private val conversationResults = LinkedHashMap<String, CachedConversationResult>()
     private var remoteFunctionsAvailable = false
+    private var transportSessionEpoch = 0L
+    private var providerGeneration: ProviderGenerationLease? = null
     private var controllerClosed = false
     private var instructionOverlay = ""
     private var remoteDefinitions: List<ToolDefinition> = emptyList()
@@ -206,116 +282,248 @@ class RealtimeSessionController(
     }
 
     private suspend fun applySessionUpdate(root: JsonObject, eventId: String?) {
-        runCatching {
+        var preparedMcpBinding: McpGenerationBinding? = null
+        try {
+            val nextProviderGeneration = requireNotNull(eventId) { "session.updateにはevent_idが必要です" }
             val session = root["session"]?.jsonObject ?: error("sessionがありません")
-            val nextInstructions = if ("instructions" in session) {
+            val expectedTransportSession = synchronized(pendingFunctionsLock) {
+                check(remoteFunctionsAvailable && !controllerClosed) {
+                    "Realtimeセッションは利用できません"
+                }
+                transportSessionEpoch
+            }
+            val knownSession = synchronized(pendingFunctionsLock) {
+                providerUpdateHistory[nextProviderGeneration]
+            }
+            if (knownSession != null) {
+                require(knownSession == session) {
+                    "同じevent_idを異なるsession.updateに再利用できません"
+                }
+                val current = synchronized(pendingFunctionsLock) {
+                    providerGeneration?.takeIf { it.id == nextProviderGeneration }
+                }
+                if (current != null) {
+                    announceProviderGeneration(current)
+                } else {
+                    sendError(eventId, "stale_event_id", "provider世代はすでに終了しました")
+                }
+                return
+            }
+            val replacesInstructions = "instructions" in session
+            val requestedInstructions = if (replacesInstructions) {
                 session["instructions"]?.jsonPrimitive?.contentOrNull ?: ""
             } else {
-                instructionOverlay
+                null
             }
-            val nextTools = if ("tools" in session) parseTools(session["tools"]!!.jsonArray) else remoteDefinitions
-            instructionOverlay = nextInstructions
-            remoteDefinitions = nextTools
-            registry.installRemoteTools(nextTools, ToolExecutor(::executeRemoteFunction), ToolExecutor(mcp::execute))
-        }.onSuccess {
-            sendSessionEvent("session.updated", eventId)
-        }.onFailure {
-            sendError(eventId, "invalid_request", it.message ?: "session.updateを適用できません")
-        }
-    }
-
-    private suspend fun parseTools(array: JsonArray): List<ToolDefinition> {
-        val result = mutableListOf<ToolDefinition>()
-        for (element in array) {
-            val tool = element.jsonObject
-            when (tool.requiredString("type")) {
-                "function" -> result += ToolDefinition.Function(
-                    name = tool.requiredString("name"),
-                    description = tool.string("description").orEmpty(),
-                    parameters = tool["parameters"]?.jsonObject ?: emptyObjectSchema(),
-                )
-                "mcp" -> {
-                    val label = tool.requiredString("server_label")
-                    val connectorId = tool.string("connector_id")
-                    val serverUrl = tool.string("server_url")
-                    require((connectorId == null) xor (serverUrl == null)) {
-                        "MCPにはconnector_idまたはserver_urlのどちらか一方が必要です"
+            val replacesTools = "tools" in session
+            val parsedTools = if (replacesTools) parseTools(session["tools"]!!.jsonArray) else null
+            preparedMcpBinding = parsedTools?.mcpBinding
+            lateinit var nextLease: ProviderGenerationLease
+            providerTransitionMutex.withLock {
+                val retired = synchronized(pendingFunctionsLock) {
+                    check(
+                        remoteFunctionsAvailable &&
+                            !controllerClosed &&
+                            transportSessionEpoch == expectedTransportSession,
+                    ) {
+                        "Realtimeセッションは利用できません"
                     }
-                    require(tool["authorization"] == null && tool["headers"] == null) {
-                        "認証情報はAndroidのMCPプロファイルに保存してください"
+                    val nextInstructions = requestedInstructions ?: instructionOverlay
+                    val nextTools = parsedTools?.definitions ?: remoteDefinitions
+                    nextLease = ProviderGenerationLease(
+                        id = nextProviderGeneration,
+                        session = session,
+                        mcpBinding = parsedTools?.mcpBinding ?: providerGeneration?.mcpBinding
+                            ?: McpGenerationBinding.empty(),
+                    )
+                    registry.installRemoteTools(
+                        nextTools,
+                        ToolExecutor { call -> executeRemoteFunction(call, nextLease) },
+                        ToolExecutor { call -> executeMcp(call, nextLease) },
+                    )
+                    instructionOverlay = nextInstructions
+                    remoteDefinitions = nextTools
+                    nextLease.announcement = sessionEvent(
+                        type = "session.updated",
+                        eventId = nextProviderGeneration,
+                        instructions = nextInstructions,
+                        definitions = registry.definitions,
+                    )
+                    retireProviderGenerationLocked(closeMcpBinding = replacesTools).also {
+                        providerGeneration = nextLease
+                        providerUpdateHistory[nextProviderGeneration] = session
                     }
-                    val allowed = tool["allowed_tools"]?.jsonArray
-                        ?.mapTo(linkedSetOf()) { it.jsonPrimitive.content }
-                    val approval = when (tool.string("require_approval") ?: "always") {
-                        "always" -> true
-                        "never" -> false
-                        else -> error("require_approvalはalwaysまたはneverを指定してください")
-                    }
-                    sendMcpLifecycle("mcp_list_tools.in_progress", label)
-                    val listed = runCatching {
-                        mcp.listTools(McpServerRequest(label, connectorId, serverUrl, allowed, approval))
-                    }.onFailure {
-                        sendMcpLifecycle("mcp_list_tools.failed", label, it.message)
-                    }.getOrThrow()
-                    result += listed
-                    sendMcpLifecycle("mcp_list_tools.completed", label)
                 }
-                else -> error("未対応のtool typeです")
+                cancelRetiredProviderWork(retired, "ツール設定が更新されました")
             }
+            preparedMcpBinding = null
+            announceProviderGeneration(nextLease)
+        } catch (cancelled: CancellationException) {
+            preparedMcpBinding?.close()
+            throw cancelled
+        } catch (error: Throwable) {
+            preparedMcpBinding?.close()
+            sendError(eventId, "invalid_request", error.message ?: "session.updateを適用できません")
         }
-        return result
     }
 
-    private suspend fun executeRemoteFunction(call: DeviceToolCall): String {
+    private suspend fun parseTools(array: JsonArray): ParsedTools {
+        val result = mutableListOf<ToolDefinition>()
+        val catalogs = mutableListOf<McpToolCatalog>()
+        val serverLabels = mutableSetOf<String>()
+        try {
+            for (element in array) {
+                val tool = element.jsonObject
+                when (tool.requiredString("type")) {
+                    "function" -> result += ToolDefinition.Function(
+                        name = tool.requiredString("name"),
+                        description = tool.string("description").orEmpty(),
+                        parameters = tool["parameters"]?.jsonObject ?: emptyObjectSchema(),
+                    )
+                    "mcp" -> {
+                        val label = tool.requiredString("server_label")
+                        require(serverLabels.add(label)) { "MCP server_labelが重複しています: $label" }
+                        val connectorId = tool.string("connector_id")
+                        val serverUrl = tool.string("server_url")
+                        require((connectorId == null) xor (serverUrl == null)) {
+                            "MCPにはconnector_idまたはserver_urlのどちらか一方が必要です"
+                        }
+                        require(tool["authorization"] == null && tool["headers"] == null) {
+                            "認証情報はAndroidのMCPプロファイルに保存してください"
+                        }
+                        val allowed = tool["allowed_tools"]?.jsonArray
+                            ?.mapTo(linkedSetOf()) { it.jsonPrimitive.content }
+                        val approval = when (tool.string("require_approval") ?: "always") {
+                            "always" -> true
+                            "never" -> false
+                            else -> error("require_approvalはalwaysまたはneverを指定してください")
+                        }
+                        sendMcpLifecycle("mcp_list_tools.in_progress", label)
+                        val catalog = runCatching {
+                            mcp.openCatalog(McpServerRequest(label, connectorId, serverUrl, allowed, approval))
+                        }.onFailure {
+                            sendMcpLifecycle("mcp_list_tools.failed", label, it.message)
+                        }.getOrThrow()
+                        catalogs += catalog
+                        result += catalog.definitions
+                        sendMcpLifecycle("mcp_list_tools.completed", label)
+                    }
+                    else -> error("未対応のtool typeです")
+                }
+            }
+            return ParsedTools(result, McpGenerationBinding(catalogs))
+        } catch (error: Throwable) {
+            catalogs.forEach { catalog -> runCatching { catalog.close() } }
+            throw error
+        }
+    }
+
+    private suspend fun executeRemoteFunction(
+        call: DeviceToolCall,
+        expectedProviderGeneration: ProviderGenerationLease,
+    ): String = withProviderOperation(expectedProviderGeneration) {
         val callId = UUID.randomUUID().toString()
         val itemId = UUID.randomUUID().toString()
         val responseId = UUID.randomUUID().toString()
         val result = CompletableDeferred<String>()
-        synchronized(pendingFunctionsLock) {
-            check(remoteFunctionsAvailable && !controllerClosed) {
-                "Realtimeセッションは利用できません"
+        val pending = PendingFunction(expectedProviderGeneration, result)
+        try {
+            providerTransitionMutex.withLock {
+                synchronized(pendingFunctionsLock) {
+                    requireCurrentProviderGeneration(expectedProviderGeneration)
+                    pendingFunctions[callId] = pending
+                }
+                send(buildJsonObject {
+                    put("type", "response.output_item.added")
+                    put("response_id", responseId)
+                    put("stackchan_session_update_id", expectedProviderGeneration.id)
+                    put("item", buildJsonObject {
+                        put("id", itemId)
+                        put("type", "function_call")
+                        put("call_id", callId)
+                        put("name", call.name)
+                        put("arguments", "")
+                    })
+                })
+                send(
+                    buildJsonObject {
+                        put("type", "response.function_call_arguments.done")
+                        put("event_id", UUID.randomUUID().toString())
+                        put("response_id", responseId)
+                        put("item_id", itemId)
+                        put("call_id", callId)
+                        put("name", call.name)
+                        put("arguments", call.arguments.toString())
+                        put("stackchan_session_update_id", expectedProviderGeneration.id)
+                    },
+                )
+                send(buildJsonObject {
+                    put("type", "response.output_item.done")
+                    put("response_id", responseId)
+                    put("stackchan_session_update_id", expectedProviderGeneration.id)
+                    put("item", buildJsonObject {
+                        put("id", itemId)
+                        put("type", "function_call")
+                        put("call_id", callId)
+                        put("name", call.name)
+                        put("arguments", call.arguments.toString())
+                    })
+                })
             }
-            pendingFunctions[callId] = result
-        }
-        send(buildJsonObject {
-            put("type", "response.output_item.added")
-            put("response_id", responseId)
-            put("item", buildJsonObject {
-                put("id", itemId)
-                put("type", "function_call")
-                put("call_id", callId)
-                put("name", call.name)
-                put("arguments", "")
-            })
-        })
-        send(
-            buildJsonObject {
-                put("type", "response.function_call_arguments.done")
-                put("event_id", UUID.randomUUID().toString())
-                put("response_id", responseId)
-                put("item_id", itemId)
-                put("call_id", callId)
-                put("name", call.name)
-                put("arguments", call.arguments.toString())
-            },
-        )
-        send(buildJsonObject {
-            put("type", "response.output_item.done")
-            put("response_id", responseId)
-            put("item", buildJsonObject {
-                put("id", itemId)
-                put("type", "function_call")
-                put("call_id", callId)
-                put("name", call.name)
-                put("arguments", call.arguments.toString())
-            })
-        })
-        return try {
             withTimeout(FUNCTION_TIMEOUT_MS) { result.await() }
         } finally {
             synchronized(pendingFunctionsLock) {
-                pendingFunctions.remove(callId)
+                if (pendingFunctions[callId] === pending) pendingFunctions.remove(callId)
             }
+        }
+    }
+
+    private suspend fun executeMcp(
+        call: DeviceToolCall,
+        expectedProviderGeneration: ProviderGenerationLease,
+    ): String = withProviderOperation(expectedProviderGeneration) {
+        val execution = expectedProviderGeneration.mcpBinding.prepare(call)
+        providerTransitionMutex.withLock {
+            synchronized(pendingFunctionsLock) {
+                requireCurrentProviderGeneration(expectedProviderGeneration)
+            }
+            execution.dispatch()
+        }
+    }
+
+    private suspend fun <Result> withProviderOperation(
+        expectedProviderGeneration: ProviderGenerationLease,
+        operation: suspend () -> Result,
+    ): Result = try {
+        coroutineScope {
+            val operationJob = requireNotNull(currentCoroutineContext()[Job])
+            synchronized(pendingFunctionsLock) {
+                requireCurrentProviderGeneration(expectedProviderGeneration)
+                expectedProviderGeneration.operations += operationJob
+            }
+            try {
+                expectedProviderGeneration.acknowledged.await()
+                synchronized(pendingFunctionsLock) {
+                    requireCurrentProviderGeneration(expectedProviderGeneration)
+                }
+                operation()
+            } finally {
+                synchronized(pendingFunctionsLock) {
+                    expectedProviderGeneration.operations -= operationJob
+                }
+            }
+        }
+    } catch (retired: ProviderGenerationRetiredCancellation) {
+        throw IllegalStateException(retired.message ?: "Realtime provider世代は終了しました", retired)
+    }
+
+    private fun requireCurrentProviderGeneration(expectedProviderGeneration: ProviderGenerationLease) {
+        check(
+            remoteFunctionsAvailable &&
+                !controllerClosed &&
+                providerGeneration === expectedProviderGeneration,
+        ) {
+            "Realtime provider世代は終了しました"
         }
     }
 
@@ -329,7 +537,10 @@ class RealtimeSessionController(
             if (it is JsonPrimitive && it.isString) it.content else it.toString()
         } ?: ""
         val completed = synchronized(pendingFunctionsLock) {
-            pendingFunctions[callId]?.complete(output) == true
+            val pending = pendingFunctions[callId]
+            pending != null &&
+                pending.providerGeneration === providerGeneration &&
+                pending.result.complete(output)
         }
         if (!completed) {
             return sendError(eventId, "unknown_call_id", "対応するfunction callがありません")
@@ -341,18 +552,78 @@ class RealtimeSessionController(
         })
     }
 
+    private fun announceProviderGeneration(generation: ProviderGenerationLease) {
+        lateinit var announcementJob: Job
+        announcementJob = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                var retryDelayMilliseconds = PROVIDER_ANNOUNCEMENT_RETRY_MS
+                while (
+                    synchronized(pendingFunctionsLock) {
+                        providerGeneration === generation && remoteFunctionsAvailable && !controllerClosed
+                    }
+                ) {
+                    try {
+                        if (send(generation.announcement)) {
+                            generation.acknowledged.complete(Unit)
+                            return@launch
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Throwable) {
+                        // Retry the acknowledgement while this provider generation owns the session.
+                    }
+                    delay(retryDelayMilliseconds)
+                    retryDelayMilliseconds = (retryDelayMilliseconds * 2)
+                        .coerceAtMost(PROVIDER_ANNOUNCEMENT_MAX_RETRY_MS)
+                }
+            } finally {
+                synchronized(pendingFunctionsLock) {
+                    if (generation.announcementJob === announcementJob) {
+                        generation.announcementJob = null
+                    }
+                }
+            }
+        }
+        val shouldStart = synchronized(pendingFunctionsLock) {
+            if (providerGeneration !== generation || !remoteFunctionsAvailable || controllerClosed) {
+                false
+            } else {
+                generation.announcementJob?.cancel(CancellationException("provider世代を再通知します"))
+                generation.announcementJob = announcementJob
+                true
+            }
+        }
+        if (shouldStart) {
+            announcementJob.start()
+        } else {
+            announcementJob.cancel()
+        }
+    }
+
     private suspend fun sendSessionEvent(type: String, eventId: String? = null) {
-        send(buildJsonObject {
+        send(sessionEvent(
+            type = type,
+            eventId = eventId ?: UUID.randomUUID().toString(),
+            instructions = instructionOverlay,
+            definitions = registry.definitions,
+        ))
+    }
+
+    private fun sessionEvent(
+        type: String,
+        eventId: String,
+        instructions: String,
+        definitions: List<ToolDefinition>,
+    ): JsonObject = buildJsonObject {
             put("type", type)
-            put("event_id", eventId ?: UUID.randomUUID().toString())
+            put("event_id", eventId)
             put("session", buildJsonObject {
-                put("instructions", instructionOverlay)
+                put("instructions", instructions)
                 put("tools", buildJsonArray {
-                    registry.definitions.forEach { add(toolJson(it)) }
+                    definitions.forEach { add(toolJson(it)) }
                 })
             })
-        })
-    }
+        }
 
     private fun toolJson(tool: ToolDefinition): JsonObject = buildJsonObject {
         put("type", if (tool is ToolDefinition.Mcp) "mcp_tool" else "function")
@@ -365,16 +636,16 @@ class RealtimeSessionController(
         }
     }
 
-    private suspend fun sendMcpLifecycle(type: String, label: String, error: String? = null) = send(
-        buildJsonObject {
+    private suspend fun sendMcpLifecycle(type: String, label: String, error: String? = null) {
+        send(buildJsonObject {
             put("type", type)
             put("server_label", label)
             error?.let { put("error", it) }
-        },
-    )
+        })
+    }
 
-    private suspend fun sendError(eventId: String?, code: String, message: String) = send(
-        buildJsonObject {
+    private suspend fun sendError(eventId: String?, code: String, message: String) {
+        send(buildJsonObject {
             put("type", "error")
             eventId?.let { put("event_id", it) }
             put("error", buildJsonObject {
@@ -382,48 +653,82 @@ class RealtimeSessionController(
                 put("code", code)
                 put("message", message)
             })
-        },
-    )
+        })
+    }
 
-    private suspend fun send(value: JsonObject) {
-        if (synchronized(pendingFunctionsLock) { controllerClosed }) return
-        val ready = transport.state.value as? StackChanUsbState.Ready ?: return
-        if (!ready.capabilities.hasStackChanCapability(StackChanCapabilities.EVENT)) return
+    private suspend fun send(value: JsonObject): Boolean {
+        if (synchronized(pendingFunctionsLock) { controllerClosed }) return false
+        val ready = transport.state.value as? StackChanUsbState.Ready ?: return false
+        if (!ready.capabilities.hasStackChanCapability(StackChanCapabilities.EVENT)) return false
         withContext(Dispatchers.IO) {
             encoder.encode(value.toString(), ready.maxPayload).forEach { transport.send(it) }
         }
+        return true
     }
 
     private fun activateRemoteFunctions(): Boolean = synchronized(pendingFunctionsLock) {
         if (controllerClosed) {
             false
         } else {
+            if (!remoteFunctionsAvailable) transportSessionEpoch += 1
             remoteFunctionsAvailable = true
             true
         }
     }
 
-    private fun resetSession(reason: String, closing: Boolean = false) {
-        val functionsToFail = synchronized(pendingFunctionsLock) {
+    private fun retireProviderGenerationLocked(closeMcpBinding: Boolean = true): RetiredProviderWork {
+        val generation = providerGeneration
+        providerGeneration = null
+        val functions = pendingFunctions.values.map(PendingFunction::result).also { pendingFunctions.clear() }
+        val operations = generation?.operations?.toList().orEmpty()
+        generation?.operations?.clear()
+        val announcementJob = generation?.announcementJob
+        if (generation != null) generation.announcementJob = null
+        return RetiredProviderWork(
+            functions = functions,
+            operations = operations,
+            announcementJob = announcementJob,
+            mcpBinding = generation?.mcpBinding?.takeIf { closeMcpBinding },
+        )
+    }
+
+    private fun cancelRetiredProviderWork(work: RetiredProviderWork, reason: String) {
+        val failure = IllegalStateException(reason)
+        work.functions.forEach { it.completeExceptionally(failure) }
+        val cancellation = ProviderGenerationRetiredCancellation(reason)
+        work.operations.forEach { it.cancel(cancellation) }
+        work.announcementJob?.cancel(cancellation)
+        work.mcpBinding?.close()
+    }
+
+    private suspend fun resetSession(reason: String) {
+        providerTransitionMutex.withLock {
+            resetSessionState(reason, closing = false)
+        }
+    }
+
+    private fun resetSessionState(reason: String, closing: Boolean) {
+        val retired = synchronized(pendingFunctionsLock) {
             remoteFunctionsAvailable = false
             if (closing) {
                 controllerClosed = true
                 conversationResults.clear()
             }
-            pendingFunctions.values.toList().also { pendingFunctions.clear() }
+            providerUpdateHistory.clear()
+            instructionOverlay = ""
+            remoteDefinitions = emptyList()
+            registry.clearRemoteTools()
+            retireProviderGenerationLocked()
         }
-        functionsToFail.forEach { it.completeExceptionally(IllegalStateException(reason)) }
+        cancelRetiredProviderWork(retired, reason)
         synchronized(decoderLock) { decoder.reset() }
-        instructionOverlay = ""
-        remoteDefinitions = emptyList()
-        registry.clearRemoteTools()
         mcp.close()
     }
 
     override fun close() {
         eventJob?.cancel()
         stateJob?.cancel()
-        resetSession("セッションを終了しました", closing = true)
+        resetSessionState("セッションを終了しました", closing = true)
     }
 
     private fun JsonObject.string(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull
@@ -435,5 +740,7 @@ class RealtimeSessionController(
 
     private companion object {
         const val FUNCTION_TIMEOUT_MS = 30_000L
+        const val PROVIDER_ANNOUNCEMENT_RETRY_MS = 100L
+        const val PROVIDER_ANNOUNCEMENT_MAX_RETRY_MS = 2_000L
     }
 }

@@ -3,20 +3,26 @@ import type { CodexAppServer } from '../codex/app-server.js'
 import { isRecord } from '../codex/app-server.js'
 import type { RpcNotification } from '../codex/rpc.js'
 import type { PcmChunk, StackChanDevice } from '../types.js'
-import { pcmChunk, StreamingPcm16Resampler } from './pcm.js'
+import {
+  createVoiceOutputTransform,
+  type PcmAudioTransform,
+  type VoiceEffect,
+  VOICE_EFFECT_SAMPLE_RATE,
+} from './voice-effect.js'
 import {
   RealtimeWebRtcSession,
   type RealtimeAudioSession,
+  type RealtimeAudioTurnEnd,
 } from './webrtc.js'
 
 const REALTIME_SAMPLE_RATE = 24_000
-const ASSISTANT_AUDIO_GRACE_MS = 500
-const OUTPUT_AUDIO_IDLE_FALLBACK_MS = 2_000
 const MAX_OUTPUT_QUEUE_BYTES = REALTIME_SAMPLE_RATE * 2 * 5
+const MAX_SOURCE_QUEUE_BYTES = VOICE_EFFECT_SAMPLE_RATE * 2 * 5
 const OUTPUT_PREBUFFER_MILLISECONDS = 240
 const OUTPUT_PREBUFFER_BYTES =
   (REALTIME_SAMPLE_RATE * 2 * OUTPUT_PREBUFFER_MILLISECONDS) / 1_000
-const MIN_AUDIBLE_PCM_PEAK = 32
+const MIN_AUDIBLE_PCM_RMS = 128
+const OUTPUT_AUDIO_LIFECYCLE_WATCHDOG_MS = 5_000
 
 export type AudioBridgeLogger = {
   info(message: string): void
@@ -39,6 +45,11 @@ export type RealtimeAudioSessionFactory = (
 export type RealtimeAudioState = 'listening' | 'recognizing' | 'speaking'
 export type RealtimeAudioStateSink = (state: RealtimeAudioState) => Promise<void>
 
+export type RealtimeAudioOutputOptions = {
+  voiceEffect?: VoiceEffect
+  transform?: PcmAudioTransform
+}
+
 const defaultSessionFactory: RealtimeAudioSessionFactory = (appServer, voice, prompt) =>
   new RealtimeWebRtcSession(appServer, {
     ...(voice ? { voice } : {}),
@@ -53,22 +64,25 @@ export class RealtimeAudioBridge {
   readonly #logger: AudioBridgeLogger
   readonly #sessionFactory: RealtimeAudioSessionFactory
   readonly #stateSink: RealtimeAudioStateSink
+  readonly #outputTransform: PcmAudioTransform
   readonly #failure = new Deferred<never>()
   #session: RealtimeAudioSession | undefined
   #running = false
   #micController: AbortController | undefined
   #micTask: Promise<void> | undefined
   #playbackController: AbortController | undefined
+  #playbackSourceQueue: AsyncQueue<PcmChunk> | undefined
   #playbackQueue: AsyncQueue<PcmChunk> | undefined
   #playbackReady: Deferred<void> | undefined
   #playbackTask: Promise<void> | undefined
+  #sourceQueuedBytes = 0
   #playbackQueuedBytes = 0
   #playbackClosing = false
-  #outputResampler: StreamingPcm16Resampler | undefined
-  #outputSourceRate = 0
-  #assistantTranscriptDone = false
-  #lastOutputAudioAt = 0
-  #playbackEndTimer: NodeJS.Timeout | undefined
+  #assistantTranscriptCompleted = false
+  #assistantAudioBoundaryDeclared = false
+  #assistantAudioBoundaryCompleted = false
+  #assistantAudioBoundaryTurnId: string | undefined
+  #outputLifecycleWatchdog: NodeJS.Timeout | undefined
   #terminalError: Error | undefined
 
   constructor(
@@ -79,6 +93,7 @@ export class RealtimeAudioBridge {
     sessionFactory: RealtimeAudioSessionFactory = defaultSessionFactory,
     stateSink: RealtimeAudioStateSink = (state) => device.setConversationState(state),
     prompt?: string,
+    outputOptions: RealtimeAudioOutputOptions = {},
   ) {
     this.#appServer = appServer
     this.#device = device
@@ -87,6 +102,9 @@ export class RealtimeAudioBridge {
     this.#logger = logger
     this.#sessionFactory = sessionFactory
     this.#stateSink = stateSink
+    this.#outputTransform =
+      outputOptions.transform ??
+      createVoiceOutputTransform(outputOptions.voiceEffect)
   }
 
   async run(signal: AbortSignal): Promise<void> {
@@ -96,8 +114,13 @@ export class RealtimeAudioBridge {
     this.#session = session
     const onNotification = (notification: RpcNotification) => this.#handleNotification(notification)
     const onSessionAudio = (chunk: PcmChunk) => this.#handleOutputAudio(chunk)
+    const onSessionAudioEndDeclared = (turn: RealtimeAudioTurnEnd) =>
+      this.#handleOutputAudioEndDeclared(turn)
+    const onSessionAudioEnd = (turn: RealtimeAudioTurnEnd) => this.#handleOutputAudioEnd(turn)
     this.#appServer.on('notification', onNotification)
     session.on('audio', onSessionAudio)
+    session.on('audioEndDeclared', onSessionAudioEndDeclared)
+    session.on('audioEnd', onSessionAudioEnd)
     const abortDeferred = new Deferred<never>()
     const onAbort = () => abortDeferred.reject(signal.reason ?? abortError())
     if (signal.aborted) onAbort()
@@ -127,12 +150,14 @@ export class RealtimeAudioBridge {
       this.#running = false
       this.#appServer.off('notification', onNotification)
       session.off('audio', onSessionAudio)
+      session.off('audioEndDeclared', onSessionAudioEndDeclared)
+      session.off('audioEnd', onSessionAudioEnd)
       signal.removeEventListener('abort', onAbort)
-      if (this.#playbackEndTimer) clearTimeout(this.#playbackEndTimer)
-      this.#playbackEndTimer = undefined
       this.#micController?.abort(abortError('audio bridge stopped'))
       this.#playbackController?.abort(abortError('audio bridge stopped'))
+      this.#clearOutputLifecycleWatchdog()
       this.#playbackReady?.resolve()
+      this.#playbackSourceQueue?.close()
       this.#playbackQueue?.close()
       await Promise.allSettled([
         this.#device.stopMicrophone(),
@@ -161,6 +186,7 @@ export class RealtimeAudioBridge {
 
   async #pumpMicrophone(signal: AbortSignal): Promise<void> {
     for await (const chunk of this.#device.microphone(signal, () => {
+      this.#logger.info('CoreS3音声認識開始')
       void this.#setState('listening')
     })) {
       if (chunk.sampleRate !== 16_000 || chunk.channels !== 1 || chunk.format !== 's16le') {
@@ -216,36 +242,23 @@ export class RealtimeAudioBridge {
   #handleOutputAudio(chunk: PcmChunk): void {
     try {
       this.#validateOutputAudio(chunk)
-      const audible = hasAudiblePcm16(chunk.data)
-      if (!audible && !this.#playbackQueue) return
-      if (this.#playbackClosing) {
-        return
-      }
-      if (chunk.sampleRate !== this.#outputSourceRate) {
-        this.#outputSourceRate = chunk.sampleRate
-        this.#outputResampler = new StreamingPcm16Resampler(chunk.sampleRate, REALTIME_SAMPLE_RATE)
-      }
-      const output = this.#outputResampler?.processBytes(chunk.data) ?? chunk.data
-      if (output.byteLength === 0) return
-      if (!this.#playbackQueue) this.#beginPlayback()
-      const queue = this.#playbackQueue
+      const audible = isAudiblePcm16(chunk.data)
+      if (!audible && !this.#playbackSourceQueue) return
+      if (this.#playbackClosing) return
+      if (!this.#playbackSourceQueue) this.#beginPlayback()
+      const queue = this.#playbackSourceQueue
       if (!queue) {
-        this.#fail(new Error('speaker queue could not be created'))
+        this.#fail(new Error('audio source queue could not be created'))
         return
       }
-      if (this.#playbackQueuedBytes + output.byteLength > MAX_OUTPUT_QUEUE_BYTES) {
-        const error = new Error('Codex output audio exceeded the five-second speaker queue')
+      if (this.#sourceQueuedBytes + chunk.data.byteLength > MAX_SOURCE_QUEUE_BYTES) {
+        const error = new Error('Codex output audio exceeded the five-second processing queue')
         queue.fail(error)
         this.#fail(error)
         return
       }
-      this.#playbackQueuedBytes += output.byteLength
-      queue.push(pcmChunk(output, REALTIME_SAMPLE_RATE))
-      if (this.#playbackQueuedBytes >= OUTPUT_PREBUFFER_BYTES) this.#playbackReady?.resolve()
-      if (audible) {
-        this.#lastOutputAudioAt = Date.now()
-        this.#schedulePlaybackEnd()
-      }
+      this.#sourceQueuedBytes += chunk.data.byteLength
+      queue.push(chunk)
     } catch (error) {
       this.#fail(error)
     }
@@ -274,39 +287,109 @@ export class RealtimeAudioBridge {
       this.#fail(new Error('Codex emitted a second audio response before the previous playback finished'))
       return
     }
-    this.#assistantTranscriptDone = false
     this.#playbackClosing = false
+    this.#sourceQueuedBytes = 0
     this.#playbackQueuedBytes = 0
-    const queue = new AsyncQueue<PcmChunk>()
+    const sourceQueue = new AsyncQueue<PcmChunk>()
+    const playbackQueue = new AsyncQueue<PcmChunk>()
     const controller = new AbortController()
     const ready = new Deferred<void>()
-    this.#playbackQueue = queue
+    this.#playbackSourceQueue = sourceQueue
+    this.#playbackQueue = playbackQueue
     this.#playbackController = controller
     this.#playbackReady = ready
+    this.#scheduleOutputLifecycleWatchdog()
     this.#micController?.abort(abortError('switching to speaker playback'))
     this.#session?.resetMicrophoneAudio()
+    const outputOutcome = this.#pumpOutputAudio(
+      sourceQueue,
+      playbackQueue,
+      ready,
+      controller.signal,
+    ).then(
+      () => ({ ok: true }) as const,
+      (error: unknown) => {
+        playbackQueue.fail(error)
+        ready.resolve()
+        return { ok: false, error } as const
+      },
+    )
     this.#playbackTask = (async () => {
-      await this.#device.stopMicrophone()
-      if (this.#micTask) await this.#micTask.catch(() => undefined)
-      await waitForPlaybackReady(ready.promise, controller.signal)
-      await this.#stateSink('speaking')
-      this.#logger.info('CoreS3音声再生開始')
-      await this.#device.playAudio(this.#consumePlaybackQueue(queue), controller.signal)
-      this.#logger.info('CoreS3音声再生終了')
+      let playbackOutcome:
+        | { ok: true }
+        | { ok: false; error: unknown } = { ok: true }
+      try {
+        await this.#device.stopMicrophone()
+        if (this.#micTask) await this.#micTask.catch(() => undefined)
+        await waitForPlaybackReady(ready.promise, controller.signal)
+        await this.#stateSink('speaking')
+        this.#logger.info('CoreS3音声再生開始')
+        await this.#device.playAudio(
+          this.#consumePlaybackQueue(playbackQueue),
+          controller.signal,
+        )
+        this.#logger.info('CoreS3音声再生終了')
+      } catch (error) {
+        playbackOutcome = { ok: false, error }
+        sourceQueue.fail(error)
+        playbackQueue.fail(error)
+        ready.resolve()
+      }
+      const output = await outputOutcome
+      if (!playbackOutcome.ok) throw playbackOutcome.error
+      if (!output.ok) throw output.error
     })()
       .catch((error) => {
         if (!controller.signal.aborted) this.#fail(error)
       })
       .finally(() => {
         if (this.#playbackController === controller) this.#playbackController = undefined
-        if (this.#playbackQueue === queue) this.#playbackQueue = undefined
+        if (this.#playbackSourceQueue === sourceQueue) this.#playbackSourceQueue = undefined
+        if (this.#playbackQueue === playbackQueue) this.#playbackQueue = undefined
         if (this.#playbackReady === ready) this.#playbackReady = undefined
         this.#playbackTask = undefined
         this.#playbackClosing = false
-        this.#outputResampler = undefined
-        this.#outputSourceRate = 0
+        this.#resetAssistantOutputLifecycle()
+        this.#sourceQueuedBytes = 0
+        this.#playbackQueuedBytes = 0
         if (this.#running && !this.#terminalError) this.#startMicrophone()
       })
+  }
+
+  async #pumpOutputAudio(
+    sourceQueue: AsyncQueue<PcmChunk>,
+    playbackQueue: AsyncQueue<PcmChunk>,
+    ready: Deferred<void>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    try {
+      for await (const chunk of this.#outputTransform(
+        this.#consumeSourceQueue(sourceQueue),
+        signal,
+      )) {
+        this.#validateTransformedAudio(chunk)
+        if (chunk.data.byteLength === 0) continue
+        if (this.#playbackQueuedBytes + chunk.data.byteLength > MAX_OUTPUT_QUEUE_BYTES) {
+          throw new Error('Codex output audio exceeded the five-second speaker queue')
+        }
+        this.#playbackQueuedBytes += chunk.data.byteLength
+        playbackQueue.push(chunk)
+        if (this.#playbackQueuedBytes >= OUTPUT_PREBUFFER_BYTES) ready.resolve()
+      }
+      playbackQueue.close()
+    } finally {
+      ready.resolve()
+    }
+  }
+
+  async *#consumeSourceQueue(queue: AsyncQueue<PcmChunk>): AsyncGenerator<PcmChunk> {
+    for await (const chunk of queue) {
+      this.#sourceQueuedBytes = Math.max(
+        0,
+        this.#sourceQueuedBytes - chunk.data.byteLength,
+      )
+      yield chunk
+    }
   }
 
   async *#consumePlaybackQueue(queue: AsyncQueue<PcmChunk>): AsyncGenerator<PcmChunk> {
@@ -316,31 +399,89 @@ export class RealtimeAudioBridge {
     }
   }
 
+  #validateTransformedAudio(chunk: PcmChunk): void {
+    if (
+      !chunk ||
+      typeof chunk !== 'object' ||
+      !(chunk.data instanceof Uint8Array) ||
+      chunk.sampleRate !== REALTIME_SAMPLE_RATE ||
+      chunk.channels !== 1 ||
+      chunk.format !== 's16le' ||
+      chunk.data.byteLength % 2 !== 0
+    ) {
+      throw new Error('audio output transform must return complete 24 kHz PCM16LE mono')
+    }
+  }
+
   #handleTranscriptDone(params: Record<string, unknown>): void {
     const role = typeof params.role === 'string' ? params.role : ''
     if (role === 'user') {
+      // The data channel can overtake both ordered app-server transcript
+      // notifications. Preserve an observed assistant boundary until the
+      // following assistant transcript consumes it.
+      if (!this.#assistantAudioBoundaryDeclared) this.#resetAssistantOutputLifecycle()
       void this.#setState('recognizing')
       return
     }
-    if (role !== 'assistant') return
-    this.#assistantTranscriptDone = true
-    this.#playbackReady?.resolve()
-    this.#schedulePlaybackEnd()
+    if (role === 'assistant') {
+      this.#assistantTranscriptCompleted = true
+      if (this.#finishSilentOutputLifecycle()) return
+      this.#scheduleOutputLifecycleWatchdog()
+    }
   }
 
-  #schedulePlaybackEnd(): void {
-    if (!this.#playbackQueue || this.#playbackClosing) return
-    if (this.#playbackEndTimer) clearTimeout(this.#playbackEndTimer)
-    const elapsed = Date.now() - this.#lastOutputAudioAt
-    const delay = this.#assistantTranscriptDone
-      ? Math.max(0, ASSISTANT_AUDIO_GRACE_MS - elapsed)
-      : OUTPUT_AUDIO_IDLE_FALLBACK_MS
-    this.#playbackEndTimer = setTimeout(() => {
-      this.#playbackEndTimer = undefined
-      this.#playbackClosing = true
-      this.#playbackReady?.resolve()
-      this.#playbackQueue?.close()
-    }, delay)
+  #handleOutputAudioEndDeclared(turn: RealtimeAudioTurnEnd): void {
+    this.#recordAssistantAudioBoundary(turn)
+    this.#assistantAudioBoundaryDeclared = true
+    this.#clearOutputLifecycleWatchdog()
+  }
+
+  #handleOutputAudioEnd(turn: RealtimeAudioTurnEnd): void {
+    this.#recordAssistantAudioBoundary(turn)
+    this.#assistantAudioBoundaryDeclared = true
+    this.#assistantAudioBoundaryCompleted = true
+    this.#clearOutputLifecycleWatchdog()
+    if (!this.#playbackSourceQueue) {
+      this.#finishSilentOutputLifecycle()
+      return
+    }
+    if (this.#playbackClosing) return
+    this.#playbackClosing = true
+    this.#playbackReady?.resolve()
+    this.#playbackSourceQueue.close()
+  }
+
+  #recordAssistantAudioBoundary(turn: RealtimeAudioTurnEnd): void {
+    if (
+      this.#assistantAudioBoundaryTurnId !== undefined &&
+      this.#assistantAudioBoundaryTurnId !== turn.id
+    ) {
+      this.#fail(
+        new Error(
+          `Codex v3 overlapped output audio boundaries: ${this.#assistantAudioBoundaryTurnId} and ${turn.id}`,
+        ),
+      )
+      return
+    }
+    this.#assistantAudioBoundaryTurnId = turn.id
+  }
+
+  #finishSilentOutputLifecycle(): boolean {
+    if (
+      this.#playbackSourceQueue ||
+      !this.#assistantTranscriptCompleted ||
+      !this.#assistantAudioBoundaryCompleted
+    ) return false
+    this.#resetAssistantOutputLifecycle()
+    return true
+  }
+
+  #resetAssistantOutputLifecycle(): void {
+    this.#assistantTranscriptCompleted = false
+    this.#assistantAudioBoundaryDeclared = false
+    this.#assistantAudioBoundaryCompleted = false
+    this.#assistantAudioBoundaryTurnId = undefined
+    this.#clearOutputLifecycleWatchdog()
   }
 
   #fail(error: unknown): void {
@@ -349,15 +490,41 @@ export class RealtimeAudioBridge {
     this.#terminalError = normalized
     this.#logger.error(`音声ブリッジエラー: ${normalized.message}`)
     if (this.#playbackQueue && this.#playbackTask) {
-      if (this.#playbackEndTimer) clearTimeout(this.#playbackEndTimer)
-      this.#playbackEndTimer = undefined
       this.#playbackClosing = true
       this.#playbackReady?.resolve()
-      this.#playbackQueue.close()
+      this.#playbackSourceQueue?.close()
       void this.#playbackTask.finally(() => this.#failure.reject(normalized))
       return
     }
     this.#failure.reject(normalized)
+  }
+
+  #clearOutputLifecycleWatchdog(): void {
+    if (this.#outputLifecycleWatchdog) {
+      clearTimeout(this.#outputLifecycleWatchdog)
+      this.#outputLifecycleWatchdog = undefined
+    }
+  }
+
+  #scheduleOutputLifecycleWatchdog(): void {
+    if (
+      !this.#assistantTranscriptCompleted ||
+      this.#assistantAudioBoundaryDeclared ||
+      this.#playbackClosing
+    ) return
+    this.#clearOutputLifecycleWatchdog()
+    this.#outputLifecycleWatchdog = setTimeout(() => {
+      this.#outputLifecycleWatchdog = undefined
+      if (
+        !this.#assistantTranscriptCompleted ||
+        this.#assistantAudioBoundaryDeclared
+      ) return
+      this.#fail(
+        new Error(
+          'Codex v3 completed the assistant transcript without declaring its RTP media boundary',
+        ),
+      )
+    }, OUTPUT_AUDIO_LIFECYCLE_WATCHDOG_MS)
   }
 
   async #setState(state: RealtimeAudioState): Promise<void> {
@@ -381,10 +548,14 @@ async function waitForPlaybackReady(ready: Promise<void>, signal: AbortSignal): 
   }
 }
 
-function hasAudiblePcm16(data: Uint8Array): boolean {
+export function isAudiblePcm16(data: Uint8Array): boolean {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+  const sampleCount = data.byteLength / 2
+  if (sampleCount === 0) return false
+  let sumSquares = 0
   for (let offset = 0; offset < data.byteLength; offset += 2) {
-    if (Math.abs(view.getInt16(offset, true)) >= MIN_AUDIBLE_PCM_PEAK) return true
+    const sample = view.getInt16(offset, true)
+    sumSquares += sample * sample
   }
-  return false
+  return sumSquares >= MIN_AUDIBLE_PCM_RMS * MIN_AUDIBLE_PCM_RMS * sampleCount
 }
