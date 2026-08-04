@@ -10,6 +10,7 @@ Codex SDKは使用しません。daemonのUnix socketへ標準WebSocketで接続
 - `codex-cli` 0.145.0相当のRealtime API
 - ChatGPTへログイン済みのCodex app-server
 - USB v2 contractとEVENT capabilityに対応したM5Stack CoreS3 firmware
+- メニューバーアプレットを使う場合は、systemd user service、GJS、GTK 3、AyatanaAppIndicator3、StatusNotifier対応パネル
 
 WebSocket音声transportはAPIキー認証を要求しますが、このブリッジはWebRTC transportを使います。ChatGPTログインで接続でき、`OPENAI_API_KEY`は不要です。app-serverのWebRTC仕様は[Codex app-server README](https://github.com/openai/codex/blob/25af12f7e61572b0bc18ddb1008be543b91519b0/codex-rs/app-server/README.md#L898-L943)を参照してください。
 
@@ -119,7 +120,7 @@ node dist/src/cli.js \
   --socket /tmp/stackchan-codex.sock
 ```
 
-複数のCoreS3を接続する常駐運用では、列挙順の変わるdevice pathではなくUSB serial numberを使います。
+複数のCoreS3を接続する手動運用では、列挙順の変わるdevice pathではなくUSB serial numberを使います。
 
 ```bash
 node dist/src/cli.js \
@@ -127,8 +128,10 @@ node dist/src/cli.js \
   --device-id USB_SERIAL_NUMBER
 ```
 
-`--device-id`と`--port`は同時に指定できません。
+`--device-id`と`--port`と`--device-selection`は同時に指定できません。
 指定したIDが見つからなくても、別のCoreS3へ自動接続しません。
+`--device-selection`はsystemd user serviceが選択ファイルを読むための引数です。
+通常の手動実行では指定しません。
 `--cwd`、`--voice`、`--thread`は受け付けません。
 会話設定を変更した場合は`workspace apply`で常駐serviceへ反映します。
 
@@ -144,8 +147,9 @@ daemon側の記録は通常`~/.codex/app-server-daemon/app-server.stderr.log`で
 
 ## 常駐サービス
 
-先にbuildを実行し、`/dev/ttyACM0`へ常駐対象のStack-chanだけを接続します。
-インストーラはこのポートのUSB serial numberを取得し、systemd user unitへ固定します。
+先にbuildを実行し、`/dev/ttyACM0`へ最初に使うStack-chanを接続します。
+インストーラはこのポートのUSB serial numberを取得し、`~/.config/stackchan-codex-voice/selected-device`へ保存します。
+systemd user unitは起動時にこの選択ファイルを読みます。
 
 ```bash
 npm run build
@@ -163,6 +167,8 @@ journalctl --user -u stackchan-codex-voice.service -f
 
 同名unitがこのインストーラの生成物でない場合は上書きしません。
 インストーラはunitを有効化した後に`is-active`を検査し、起動できないunitを成功として報告しません。
+生成unitは設定不備を示す終了コード78を自動再起動しません。
+既存unitへこの設定を反映する場合は、build後に`npm run install:user-service -- --port /dev/ttyACM0`を再実行してください。
 
 旧`bridge/codex-stackchan-voice`、`hosts/codex-voice`、または旧CLIから移行する場合、
 既存unitには移動前のCLI絶対パスや`--cwd`、`--voice`が残っています。
@@ -170,6 +176,50 @@ journalctl --user -u stackchan-codex-voice.service -f
 
 ```bash
 systemctl --user restart stackchan-codex-voice.service
+```
+
+## メニューバーアプレット
+
+アプレットはCodex voice serviceのONとOFF、接続中のCoreS3一覧、選択中の接続先を表示します。
+接続先はUSB serial numberで保存するため、再接続によって`/dev/ttyACM*`の番号が変わっても同じCoreS3を選びます。
+
+Ubuntuでは次のruntime packageを導入します。
+
+```bash
+sudo apt install gjs gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
+```
+
+音声serviceを新しい選択ファイル方式で再導入してから、アプレットを導入します。
+
+```bash
+npm run build
+npm run install:user-service -- --port /dev/ttyACM0
+npm run install:applet
+```
+
+アプレットは`stackchan-codex-voice-applet.service`として現在のuser sessionへ起動し、次回ログイン時にも起動します。
+Waybarでは設定の`modules-left`、`modules-center`、`modules-right`のいずれかに`tray`が必要です。
+GNOME ShellではStatusNotifierまたはAppIndicatorに対応するextensionが必要です。
+
+サービスがONの状態で接続先を選ぶと、アプレットは選択を保存して音声serviceを再起動します。
+サービスがOFFの状態で選んだ場合はOFFを維持し、次回ONにした時点で選択したCoreS3へ接続します。
+選択したCoreS3が未接続でも、別のCoreS3へ自動接続しません。
+
+同じ操作はCLIからも実行できます。
+
+```bash
+node dist/src/cli.js status
+node dist/src/cli.js service stop
+node dist/src/cli.js device list
+node dist/src/cli.js device use USB_SERIAL_NUMBER
+node dist/src/cli.js service start
+```
+
+「アプレットを終了」は表示プロセスだけを終了し、音声serviceのONとOFFを変更しません。
+自動起動も停止する場合は次のunitを無効化します。
+
+```bash
+systemctl --user disable --now stackchan-codex-voice-applet.service
 ```
 
 ## Firmware MOD

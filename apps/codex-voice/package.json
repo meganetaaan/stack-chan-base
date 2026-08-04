@@ -6,7 +6,9 @@
   "type": "module",
   "bin": {
     "stackchan-codex-voice": "./dist/src/cli.js",
-    "stackchan-codex-voice-install-service": "./dist/src/service/install-user-service.js"
+    "stackchan-codex-voice-install-service": "./dist/src/service/install-user-service.js",
+    "stackchan-codex-voice-applet": "./dist/src/applet/status-applet.js",
+    "stackchan-codex-voice-install-applet": "./dist/src/applet/install-status-applet.js"
   },
   "files": [
     "dist",
@@ -23,6 +25,7 @@
     "clean": "rm -rf dist",
     "generate:codex-types": "node scripts/generate-codex-types.mjs",
     "install:user-service": "node dist/src/service/install-user-service.js",
+    "install:applet": "node dist/src/applet/install-status-applet.js",
     "test": "npm run test:node && npm run test:vitest",
     "test:node": "npm run build && node --test \"dist/**/*.test.js\"",
     "test:vitest": "vitest run",

@@ -1,11 +1,15 @@
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
-export type RunOptions = {
+export type ApplicationRunOptions = {
   portPath?: string
   deviceId?: string
   socketPath?: string
   startImmediately?: boolean
+}
+
+export type RunOptions = ApplicationRunOptions & {
+  deviceSelectionPath?: string
 }
 
 export type CliCommand =
@@ -19,6 +23,11 @@ export type CliCommand =
   | { kind: 'workspace-current' }
   | { kind: 'workspace-apply' }
   | { kind: 'voice-list'; socketPath?: string }
+  | { kind: 'status'; json: boolean; unitName?: string; deviceSelectionPath?: string }
+  | { kind: 'service-start'; unitName?: string }
+  | { kind: 'service-stop'; unitName?: string }
+  | { kind: 'device-list'; json: boolean; deviceSelectionPath?: string }
+  | { kind: 'device-use'; deviceId: string; unitName?: string; deviceSelectionPath?: string }
   | { kind: 'help' }
   | { kind: 'version' }
 
@@ -37,6 +46,12 @@ export function parseCliCommand(args: string[]): CliCommand {
       return parseWorkspace(rest)
     case 'voice':
       return parseVoice(rest)
+    case 'status':
+      return parseStatus(rest)
+    case 'service':
+      return parseService(rest)
+    case 'device':
+      return parseDevice(rest)
     default:
       throw new Error(`未知のcommandです: ${command ?? ''}`)
   }
@@ -50,18 +65,27 @@ function parseRun(args: string[]): CliCommand {
     options: {
       port: { type: 'string' },
       'device-id': { type: 'string' },
+      'device-selection': { type: 'string' },
       socket: { type: 'string' },
       'start-immediately': { type: 'boolean' },
     },
   })
-  if (parsed.values.port && parsed.values['device-id']) {
-    throw new Error('--port and --device-id are mutually exclusive')
+  const selectors = [
+    parsed.values.port,
+    parsed.values['device-id'],
+    parsed.values['device-selection'],
+  ].filter((value) => value !== undefined)
+  if (selectors.length > 1) {
+    throw new Error('--port, --device-id, and --device-selection are mutually exclusive')
   }
   return {
     kind: 'run',
     options: {
       ...(parsed.values.port ? { portPath: parsed.values.port } : {}),
       ...(parsed.values['device-id'] ? { deviceId: parsed.values['device-id'] } : {}),
+      ...(parsed.values['device-selection']
+        ? { deviceSelectionPath: resolve(parsed.values['device-selection']) }
+        : {}),
       ...(parsed.values.socket ? { socketPath: parsed.values.socket } : {}),
       ...(parsed.values['start-immediately'] ? { startImmediately: true } : {}),
     },
@@ -168,6 +192,91 @@ function parseVoice(args: string[]): CliCommand {
   }
 }
 
+function parseStatus(args: string[]): CliCommand {
+  const parsed = parseArgs({
+    args,
+    allowPositionals: false,
+    strict: true,
+    options: {
+      json: { type: 'boolean' },
+      'unit-name': { type: 'string' },
+      'device-selection': { type: 'string' },
+    },
+  })
+  return {
+    kind: 'status',
+    json: parsed.values.json ?? false,
+    ...(parsed.values['unit-name'] ? { unitName: parsed.values['unit-name'] } : {}),
+    ...(parsed.values['device-selection']
+      ? { deviceSelectionPath: resolve(parsed.values['device-selection']) }
+      : {}),
+  }
+}
+
+function parseService(args: string[]): CliCommand {
+  const [action, ...rest] = args
+  if (action !== 'start' && action !== 'stop') {
+    throw new Error(`未知のservice commandです: ${action ?? ''}`)
+  }
+  const parsed = parseArgs({
+    args: rest,
+    allowPositionals: false,
+    strict: true,
+    options: {
+      'unit-name': { type: 'string' },
+    },
+  })
+  return {
+    kind: action === 'start' ? 'service-start' : 'service-stop',
+    ...(parsed.values['unit-name'] ? { unitName: parsed.values['unit-name'] } : {}),
+  }
+}
+
+function parseDevice(args: string[]): CliCommand {
+  const [action, ...rest] = args
+  if (action === 'list') {
+    const parsed = parseArgs({
+      args: rest,
+      allowPositionals: false,
+      strict: true,
+      options: {
+        json: { type: 'boolean' },
+        'device-selection': { type: 'string' },
+      },
+    })
+    return {
+      kind: 'device-list',
+      json: parsed.values.json ?? false,
+      ...(parsed.values['device-selection']
+        ? { deviceSelectionPath: resolve(parsed.values['device-selection']) }
+        : {}),
+    }
+  }
+  if (action === 'use') {
+    const parsed = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      strict: true,
+      options: {
+        'unit-name': { type: 'string' },
+        'device-selection': { type: 'string' },
+      },
+    })
+    if (parsed.positionals.length !== 1) {
+      throw new Error('Usage: stackchan-codex-voice device use <device-id>')
+    }
+    return {
+      kind: 'device-use',
+      deviceId: parsed.positionals[0]!,
+      ...(parsed.values['unit-name'] ? { unitName: parsed.values['unit-name'] } : {}),
+      ...(parsed.values['device-selection']
+        ? { deviceSelectionPath: resolve(parsed.values['device-selection']) }
+        : {}),
+    }
+  }
+  throw new Error(`未知のdevice commandです: ${action ?? ''}`)
+}
+
 function assertAtMostOnePath(positionals: string[]): void {
   if (positionals.length > 1) throw new Error('workspace pathは一つだけ指定できます')
 }
@@ -188,10 +297,20 @@ Commands:
   workspace current               選択中workspaceを表示
   workspace apply                 選択中workspaceをserviceへ再反映
   voice list [--socket <path>]     利用可能なRealtime voiceを表示
+  status [--json] [--unit-name <unit>] [--device-selection <path>]
+                                      serviceとUSBデバイスの状態を表示
+  service start [--unit-name <unit>]  Codex voice serviceをON
+  service stop [--unit-name <unit>]   Codex voice serviceをOFF
+  device list [--json] [--device-selection <path>]
+                                      接続中のCoreS3を表示
+  device use <device-id> [--unit-name <unit>] [--device-selection <path>]
+                                      接続先CoreS3を選択
 
 Run options:
   --port <path>       CoreS3 USB serial port（--device-idと排他）
   --device-id <id>   USB serial numberでCoreS3を固定（常駐運用向け）
+  --device-selection <path>
+                      選択ファイルからUSB serial numberを読む（service用）
   --socket <path>    app-server daemonのUnix socket
   --start-immediately
                       タッチを待たず接続（互換・診断用途）

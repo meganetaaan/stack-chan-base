@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+import {
+  deviceSelectionPath,
+  writeSelectedDeviceId,
+} from '../device-selection.js'
+import { isNodeError, runSystemctl } from '../node-utils.js'
 import { discoverStackChanDeviceId } from '../usb/device.js'
 import {
   buildStackChanUserServiceUnit,
@@ -41,12 +45,13 @@ async function main(): Promise<void> {
     parsed.values['unit-name'] ?? DEFAULT_UNIT_NAME,
   )
   const deviceId = await discoverStackChanDeviceId(portPath)
+  const selectionPath = deviceSelectionPath()
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url))
   await access(cliPath, constants.R_OK)
   const unit = buildStackChanUserServiceUnit({
     nodePath: process.execPath,
     cliPath,
-    deviceId,
+    deviceSelectionPath: selectionPath,
     ...(parsed.values.socket
       ? { socketPath: parsed.values.socket }
       : {}),
@@ -67,6 +72,7 @@ async function main(): Promise<void> {
   const temporaryPath = `${unitPath}.tmp-${process.pid}`
   await writeFile(temporaryPath, unit, { encoding: 'utf8', mode: 0o644 })
   await rename(temporaryPath, unitPath)
+  await writeSelectedDeviceId(deviceId, selectionPath)
   await enableAndStartUserService(unitName, runSystemctl)
   console.log(
     `systemd user serviceを導入しました: ${unitName} deviceId=${deviceId} workspace=${workspace.root}`,
@@ -78,13 +84,7 @@ async function assertGeneratedOrMissing(path: string): Promise<void> {
   try {
     current = await readFile(path, 'utf8')
   } catch (error) {
-    if (
-      error instanceof Error &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
-      return
-    }
+    if (isNodeError(error, 'ENOENT')) return
     throw error
   }
   if (!current.startsWith(GENERATED_UNIT_MARKER)) {
@@ -94,31 +94,11 @@ async function assertGeneratedOrMissing(path: string): Promise<void> {
   }
 }
 
-async function runSystemctl(args: string[]): Promise<void> {
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn('systemctl', args, { stdio: 'inherit' })
-    child.once('error', reject)
-    child.once('exit', (code, signal) => {
-      if (code === 0) {
-        resolvePromise()
-        return
-      }
-      reject(
-        new Error(
-          `systemctl ${args.join(' ')} failed (${
-            signal ? `signal ${signal}` : `exit ${String(code)}`
-          })`,
-        ),
-      )
-    })
-  })
-}
-
 const HELP = `Usage: stackchan-codex-voice-install-service [options]
 
 /dev/ttyACM0のUSB serial numberを取得し、Codex音声ブリッジを
-systemd --userサービスとして導入します。unitは--device-idを使うため、
-別のCoreS3へ自動接続しません。
+systemd --userサービスとして導入します。unitは選択ファイルのdevice IDを
+起動時に読むため、別のCoreS3へ自動接続せず、アプレットから変更できます。
 
 Options:
   --port <path>      ID取得元（既定: /dev/ttyACM0）
