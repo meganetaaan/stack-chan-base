@@ -427,6 +427,30 @@ describe('RealtimeWebRtcSession transport liveness', () => {
     }
   })
 
+  it('reports the event and invariant behind an invalid audio boundary', async () => {
+    const appServer = {
+      startRealtime: vi.fn(async () => 'v=0\r\n'),
+      stopRealtime: vi.fn(async () => undefined),
+    } as unknown as CodexAppServer
+    const session = new RealtimeWebRtcSession(appServer)
+    sessions.push(session)
+
+    await session.start()
+    mockWebRtc.peer!.dataChannel.emitMessage({
+      type: 'turn.created',
+      turn: { id: 'assistant-1', role: 'assistant', start_ms: 0 },
+    })
+    mockWebRtc.peer!.dataChannel.emitMessage({
+      type: 'turn.created',
+      turn: { id: 'assistant-2', role: 'assistant', start_ms: 40 },
+    })
+
+    await expect(session.closed).resolves.toMatchObject({
+      message:
+        'WebRTC realtime data channel returned an invalid audio turn boundary: assistant audio turn assistant-2 started before assistant-1 reached its media boundary (turn.created turn=assistant-2)',
+    })
+  })
+
   it('does not end an established media session on data-channel close alone', async () => {
     const appServer = {
       startRealtime: vi.fn(async () => 'v=0\r\n'),

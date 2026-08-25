@@ -1306,10 +1306,12 @@ export class RealtimeWebRtcSession
       }
       this.emit('event', parsed)
     } catch (error) {
+      const cause = normalizeError(error)
       this.#fail(
-        new Error('WebRTC realtime data channel returned an invalid audio turn boundary', {
-          cause: error,
-        }),
+        new Error(
+          `WebRTC realtime data channel returned an invalid audio turn boundary: ${cause.message} (${realtimeEventLabel(parsed)})`,
+          { cause },
+        ),
       )
     }
   }
@@ -1484,6 +1486,12 @@ function addTimestamp(value: number, samples: number): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function realtimeEventLabel(event: Record<string, unknown>): string {
+  const type = typeof event.type === 'string' ? event.type : 'unknown event'
+  if (!isRecord(event.turn) || typeof event.turn.id !== 'string') return type
+  return `${type} turn=${event.turn.id}`
 }
 
 function normalizeError(error: unknown): Error {
